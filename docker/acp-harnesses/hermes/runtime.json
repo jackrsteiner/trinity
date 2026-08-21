@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "command": ["/opt/trinity/acp/launch"],
+  "cwd": "/workspace",
+  "permission_policy": "allow",
+  "read_only": {
+    "supported": false
+  }
+}
