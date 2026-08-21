@@ -178,13 +178,23 @@ class AgentRuntime(ABC):
         """
         return RuntimeCapabilities()
 
+    def reset_session(self) -> None:
+        """Drop runtime-owned conversational state, if any.
+
+        CLI runtimes keep continuity outside this object and need no action.
+        Protocol runtimes may retain a child process/session and override this
+        hook so clearing Trinity chat history clears both layers.
+        """
+        return None
+
 
 # Accepted AGENT_RUNTIME values (lowercased). Unknown values fail loudly
 # rather than silently selecting Claude (#1187 Phase D).
 _CLAUDE_RUNTIMES = frozenset({"claude-code", "claude"})
 _GEMINI_RUNTIMES = frozenset({"gemini-cli", "gemini"})
 _CODEX_RUNTIMES = frozenset({"codex"})
-KNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES
+_ACP_RUNTIMES = frozenset({"acp"})
+KNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES | _ACP_RUNTIMES
 
 
 def get_runtime() -> AgentRuntime:
@@ -205,6 +215,10 @@ def get_runtime() -> AgentRuntime:
     """
     runtime_type = os.getenv("AGENT_RUNTIME", "claude-code").lower()
 
+    if runtime_type in _ACP_RUNTIMES:
+        from .acp_runtime import get_acp_runtime
+        logger.info("Using generic ACP runtime")
+        return get_acp_runtime()
     if runtime_type in _GEMINI_RUNTIMES:
         from .gemini_runtime import get_gemini_runtime
         logger.info("Using Gemini CLI runtime")
@@ -223,4 +237,3 @@ def get_runtime() -> AgentRuntime:
         f"Known runtimes: {sorted(KNOWN_RUNTIMES)}. "
         "Refusing to silently fall back to Claude Code."
     )
-

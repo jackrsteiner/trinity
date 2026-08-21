@@ -235,6 +235,16 @@ async def get_session_info():
     }
 
 
+@router.get("/api/runtime/capabilities")
+async def get_runtime_capabilities():
+    """Return the active runtime's declared capability matrix."""
+    runtime = get_runtime()
+    return {
+        "runtime": agent_state.agent_runtime,
+        "capabilities": runtime.capabilities().to_dict(),
+    }
+
+
 @router.get("/api/model")
 async def get_model():
     """Get the current model being used"""
@@ -301,6 +311,9 @@ async def set_model(request: ModelRequest):
 async def clear_chat_history():
     """Clear conversation history and reset session"""
     agent_state.reset_session()
+    # Protocol runtimes may own a long-lived subprocess/session in addition to
+    # AgentState's in-memory history. Reset both layers through the runtime seam.
+    get_runtime().reset_session()
     return {
         "status": "cleared",
         "session_reset": True,
