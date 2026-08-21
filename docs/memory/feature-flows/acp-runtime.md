@@ -48,5 +48,10 @@ The common runtime does not claim request-level mappings for `allowed_tools`, `m
 | Chat continuity | yes |
 | Session-tab persisted resume | no |
 | MCP configuration | no |
+| Cost reporting | unavailable |
 
 Harness-specific installation, model selection, and security translation stay in `docker/acp-harnesses/<name>/`.
+
+## Cost telemetry
+
+ACP does not provide a portable monetary-cost field, and the generic runtime cannot safely infer provider pricing from harness-specific events. `cost_reporting` is therefore `unavailable` and `ExecutionMetadata.cost_usd` remains `null`. Consumers must distinguish this from a real zero-dollar execution; provider billing remains authoritative until ACP standardizes trustworthy usage or cost telemetry.
