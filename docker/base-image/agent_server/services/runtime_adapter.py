@@ -24,12 +24,13 @@ class RuntimeCapabilities:
 
     ``cost_reporting`` is a string, not a bool: ``"native"`` means the CLI
     reports a real cost (Claude Code), ``"estimated"`` means Trinity derives
-    it from token counts (Gemini, Codex).
+    it from token counts (Gemini, Codex), and ``"unavailable"`` means the
+    protocol/runtime cannot expose trustworthy monetary telemetry.
     """
     chat_continuity: bool = False
     session_tab_resume: bool = False
     mcp_support: bool = False
-    cost_reporting: str = "estimated"  # "native" | "estimated"
+    cost_reporting: str = "estimated"  # "native" | "estimated" | "unavailable"
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
