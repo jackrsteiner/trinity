@@ -355,7 +355,7 @@ class ACPRuntime(AgentRuntime):
             chat_continuity=True,
             session_tab_resume=False,
             mcp_support=False,
-            cost_reporting="estimated",
+            cost_reporting="unavailable",
         )
 
     def _manifest(self) -> ACPManifest:

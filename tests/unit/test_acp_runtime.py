@@ -85,7 +85,7 @@ def test_runtime_declares_conservative_common_denominator():
     assert capabilities.chat_continuity is True
     assert capabilities.session_tab_resume is False
     assert capabilities.mcp_support is False
-    assert capabilities.cost_reporting == "estimated"
+    assert capabilities.cost_reporting == "unavailable"
 
 
 def test_manifest_rejects_untrusted_owner(tmp_path):
