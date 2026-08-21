@@ -1,0 +1,134 @@
+name: Publish ACP stacked series
+
+on:
+  push:
+    branches: [acp/publisher]
+    paths:
+      - '.github/workflows/acp-publish.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct validated snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .acp-publish/stage.* | base64 -d > /tmp/acp-stage.tar.gz
+          tar -xzf /tmp/acp-stage.tar.gz -C /tmp
+          test -f /tmp/acp-stage/pr2c1/docker/base-image/agent_server/services/acp_runtime.py
+          test -f /tmp/acp-stage/pr4c2/docs/memory/feature-flows/acp-runtime.md
+
+      - name: Build and push 10-commit series
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ACP implementation'
+          git config user.email 'acp-implementation@example.invalid'
+          git fetch origin main
+          git reset --hard origin/main
+          BASE=$(git rev-parse HEAD)
+          test "$BASE" = '0cb3a4e2c08abbea0b880cd98ec46892256e06e5'
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              s = p.read_text()
+              if s.count(old) < count:
+                  raise SystemExit(f'missing expected seam in {path}: {old[:80]!r}')
+              p.write_text(s.replace(old, new, count))
+
+          p = 'docker/base-image/agent_server/services/runtime_adapter.py'
+          replace(p,
+              '        return RuntimeCapabilities()\n\n\n# Accepted AGENT_RUNTIME values',
+              '''        return RuntimeCapabilities()\n\n    def reset_session(self) -> None:\n        """Drop runtime-owned conversational state, if any.\n\n        Most CLI runtimes keep their continuity outside this object and need no\n        action. Protocol runtimes may retain a child process/session and should\n        override this hook.\n        """\n        return None\n\n\n# Accepted AGENT_RUNTIME values''')
+          replace(p,
+              '_CODEX_RUNTIMES = frozenset({"codex"})\nKNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES',
+              '_CODEX_RUNTIMES = frozenset({"codex"})\n_ACP_RUNTIMES = frozenset({"acp"})\nKNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES | _ACP_RUNTIMES')
+          replace(p,
+              '    if runtime_type in _CLAUDE_RUNTIMES:\n',
+              '    if runtime_type in _ACP_RUNTIMES:\n        from .acp_runtime import get_acp_runtime\n        logger.info("Using generic ACP runtime")\n        return get_acp_runtime()\n    if runtime_type in _CLAUDE_RUNTIMES:\n')
+
+          p = 'docker/base-image/agent_server/routers/chat.py'
+          replace(p,
+              '\n\n@router.get("/api/model")',
+              '''\n\n@router.get("/api/runtime/capabilities")\nasync def get_runtime_capabilities():\n    """Return the active runtime's declared capability matrix."""\n    runtime = get_runtime()\n    return {\n        "runtime": agent_state.agent_runtime,\n        "capabilities": runtime.capabilities().to_dict(),\n    }\n\n\n@router.get("/api/model")''')
+          replace(p,
+              '    agent_state.reset_session()\n    return {',
+              '    agent_state.reset_session()\n    # Protocol runtimes may own a long-lived subprocess/session in addition to\n    # AgentState\'s in-memory history. Reset both layers through the runtime seam.\n    get_runtime().reset_session()\n    return {')
+
+          replace('src/backend/services/agent_service/helpers.py',
+              'KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset({"gemini-cli", "gemini", "codex"})',
+              'KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset({"gemini-cli", "gemini", "codex", "acp"})')
+          replace('src/backend/services/session_turn_service.py',
+              'RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex"}',
+              'RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex", "acp"}')
+          PY
+          git add docker/base-image/agent_server/routers/chat.py docker/base-image/agent_server/services/runtime_adapter.py src/backend/services/agent_service/helpers.py src/backend/services/session_turn_service.py
+          git commit -m 'runtime: add generic ACP selection seam'
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('docker/base-image/agent_server/services/runtime_adapter.py')
+          s=p.read_text()
+          s=s.replace('reports a real cost (Claude Code), ``"estimated"`` means Trinity derives\n    it from token counts (Gemini, Codex).', 'reports a real cost (Claude Code), ``"estimated"`` means Trinity derives\n    it from token counts (Gemini, Codex), and ``"unavailable"`` means the\n    protocol/runtime cannot expose trustworthy monetary telemetry.', 1)
+          s=s.replace('cost_reporting: str = "estimated"  # "native" | "estimated"', 'cost_reporting: str = "estimated"  # "native" | "estimated" | "unavailable"', 1)
+          p.write_text(s)
+          PY
+          git add docker/base-image/agent_server/services/runtime_adapter.py
+          git commit -m 'runtime: admit unavailable cost telemetry'
+          git push --force origin HEAD:refs/heads/acp/01-runtime-seam
+
+          mkdir -p docker/base-image/agent_server/services
+          cp /tmp/acp-stage/pr2c1/docker/base-image/agent_server/services/acp_runtime.py docker/base-image/agent_server/services/acp_runtime.py
+          git add docker/base-image/agent_server/services/acp_runtime.py
+          git commit -m 'runtime: implement generic ACP stdio adapter'
+
+          mkdir -p tests/unit
+          cp /tmp/acp-stage/pr2c2/tests/unit/test_acp_runtime.py tests/unit/test_acp_runtime.py
+          git add tests/unit/test_acp_runtime.py
+          git commit -m 'test: pin generic ACP protocol and security contract'
+
+          cp /tmp/acp-stage/pr2c3/docker/base-image/agent_server/services/acp_runtime.py docker/base-image/agent_server/services/acp_runtime.py
+          cp /tmp/acp-stage/pr2c3/tests/unit/test_acp_runtime.py tests/unit/test_acp_runtime.py
+          git add docker/base-image/agent_server/services/acp_runtime.py tests/unit/test_acp_runtime.py
+          git commit -m 'runtime: report generic ACP cost as unavailable'
+          git push --force origin HEAD:refs/heads/acp/02-runtime
+
+          cp -a /tmp/acp-stage/pr3c1/docker/acp-harnesses docker/
+          chmod 755 docker/acp-harnesses/hermes/launcher.sh
+          git add docker/acp-harnesses
+          git commit -m 'images: add Hermes ACP acceptance image'
+
+          mkdir -p docker/acp-harnesses/deepseek
+          cp /tmp/acp-stage/pr3c2/docker/acp-harnesses/deepseek/* docker/acp-harnesses/deepseek/
+          chmod 755 docker/acp-harnesses/deepseek/launcher.sh
+          git add docker/acp-harnesses/deepseek
+          git commit -m 'images: add DeepSeek Harness ACP acceptance image'
+
+          cp /tmp/acp-stage/pr3c3/docker/acp-harnesses/deepseek/launcher.sh docker/acp-harnesses/deepseek/launcher.sh
+          chmod 755 docker/acp-harnesses/deepseek/launcher.sh
+          git add docker/acp-harnesses/deepseek/launcher.sh
+          git commit -m 'images: keep DeepSeek ACP stdout protocol-pure'
+          git push --force origin HEAD:refs/heads/acp/03-acceptance-images
+
+          mkdir -p docs/memory/feature-flows
+          cp /tmp/acp-stage/pr4c1/docs/memory/feature-flows/acp-runtime.md docs/memory/feature-flows/acp-runtime.md
+          git add docs/memory/feature-flows/acp-runtime.md
+          git commit -m 'docs: document ACP runtime trust and lifecycle contract'
+
+          cp /tmp/acp-stage/pr4c2/docs/memory/feature-flows/acp-runtime.md docs/memory/feature-flows/acp-runtime.md
+          git add docs/memory/feature-flows/acp-runtime.md
+          git commit -m 'docs: record ACP cost telemetry limitation'
+          git push --force origin HEAD:refs/heads/acp/04-docs
+
+          git log --oneline --reverse "$BASE..HEAD"
