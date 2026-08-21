@@ -9,4 +9,7 @@ fi
 
 export DSH_SNAPSHOT_SESSIONS_ROOT=/home/developer/.dsh/sessions
 cd /opt/deepseek-harness
-exec pnpm run demo:acp
+# Invoke the protocol entrypoint directly. Package-manager script banners are
+# stdout output and would corrupt ACP's newline-delimited JSON-RPC transport.
+exec node --import tsx packages/examples/acp-demo/src/bin.ts \
+  --config examples/acp-agent/cordis.yml
