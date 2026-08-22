@@ -24,15 +24,6 @@ def _require(condition: bool, message: str) -> None:
 def _configure_harness(harness: str) -> None:
     if harness == "hermes":
         _require(bool(os.getenv("GEMINI_API_KEY")), "GEMINI_API_KEY is unavailable")
-        hermes_home = Path.home() / ".hermes"
-        hermes_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        (hermes_home / "config.yaml").write_text(
-            "model:\n"
-            "  provider: gemini\n"
-            "  default: gemini-3.7-flash\n"
-            "  base_url: https://generativelanguage.googleapis.com/v1beta\n",
-            encoding="utf-8",
-        )
         return
 
     _require(bool(os.getenv("DEEPSEEK_API_KEY")), "DEEPSEEK_API_KEY is unavailable")
@@ -140,7 +131,7 @@ async def _read_only_contract(harness: str) -> None:
         if harness == "hermes":
             try:
                 await runtime.execute_headless("Reply with OK.", timeout_seconds=60)
-            except RuntimeError as exc:
+            except Exception as exc:
                 _require(
                     "cannot enforce Trinity read-only mode" in str(exc),
                     "Hermes read-only rejection returned the wrong failure",

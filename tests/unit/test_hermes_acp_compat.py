@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import stat
 import sys
 from collections import deque
 from pathlib import Path
@@ -105,3 +107,22 @@ def test_duplicate_or_unmatched_completion_is_ignored(monkeypatch):
     )
 
     callback("tool.completed", "terminal", result="late")
+
+
+def test_provider_config_uses_runtime_model_without_persisting_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AGENT_RUNTIME_MODEL", "gemini-test-model")
+    monkeypatch.setenv("GEMINI_API_KEY", "must-not-be-written")
+
+    compat = _load_compat()
+    config_path = compat.configure_provider()
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert data["model"] == {
+        "provider": "gemini",
+        "default": "gemini-test-model",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+    }
+    assert "must-not-be-written" not in config_path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config_path.parent.stat().st_mode) == 0o700

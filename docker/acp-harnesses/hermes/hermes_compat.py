@@ -9,7 +9,50 @@ Forward the direct callback and leave all other Hermes behavior untouched.
 from __future__ import annotations
 
 from collections import deque
+import json
+import os
+from pathlib import Path
 from typing import Any, Callable
+
+
+def configure_provider() -> Path:
+    """Materialize a key-free Hermes provider config for this derived image."""
+    config_dir = Path.home() / ".hermes"
+    config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config_dir.chmod(0o700)
+    config_path = config_dir / "config.yaml"
+
+    if os.getenv("TRINITY_HERMES_AUTOCONFIG", "1") == "0" and config_path.exists():
+        return config_path
+
+    model = (
+        os.getenv("ACP_MODEL")
+        or os.getenv("AGENT_RUNTIME_MODEL")
+        or "gemini-3.7-flash"
+    )
+    provider = os.getenv("ACP_PROVIDER", "gemini")
+    base_url = os.getenv(
+        "ACP_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+    )
+    # JSON is valid YAML. Writing a structured document avoids quoting bugs and
+    # intentionally stores no credential value; Hermes reads GEMINI_API_KEY
+    # directly from the process environment injected by Trinity.
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {
+                    "provider": provider,
+                    "default": model,
+                    "base_url": base_url,
+                }
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+    return config_path
 
 
 def install_tool_completion_bridge() -> None:
@@ -77,6 +120,7 @@ def install_tool_completion_bridge() -> None:
 
 
 def main() -> None:
+    configure_provider()
     install_tool_completion_bridge()
     from acp_adapter.entry import main as hermes_main
 

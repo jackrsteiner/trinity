@@ -1118,6 +1118,9 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
         try:
             # #2104: template.yaml `type:` stays parseable but is ignored —
             # the agent type taxonomy is retired (tags classify agents).
+            template_base_image = template_data.get("base_image")
+            if isinstance(template_base_image, str) and template_base_image.strip():
+                config.base_image = template_base_image.strip()
             config.resources = template_data.get("resources", config.resources)
             config.tools = template_data.get("tools", config.tools)
             # Read through the tolerant accessor rather than reaching straight
@@ -1621,16 +1624,24 @@ def _apply_subscription_env(config: AgentConfig, env_vars: dict) -> Optional[str
 
 
 def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
-    """Inject GEMINI_API_KEY for Gemini runtimes and the (default-on) Claude Code
-    OpenTelemetry export vars."""
-    # Add Google API key if using Gemini runtime
-    # Gemini CLI expects GEMINI_API_KEY environment variable
-    if config.runtime == 'gemini-cli' or config.runtime == 'gemini':
-        google_api_key = os.getenv('GOOGLE_API_KEY', '')
+    """Inject Gemini credentials where the selected image consumes them, plus
+    the (default-on) Claude Code OpenTelemetry export vars."""
+    # Gemini CLI and the pinned ACP Hermes/Gemini image both expect this name.
+    uses_platform_gemini = config.runtime in {'gemini-cli', 'gemini'} or (
+        config.runtime == 'acp'
+        and config.base_image == 'trinity-agent-base:acp-hermes'
+    )
+    if uses_platform_gemini:
+        google_api_key = (
+            os.getenv('GOOGLE_API_KEY', '') or os.getenv('GEMINI_API_KEY', '')
+        )
         if google_api_key:
-            env_vars['GEMINI_API_KEY'] = google_api_key  # Gemini CLI expects this name
+            env_vars['GEMINI_API_KEY'] = google_api_key
         else:
-            logger.warning("Gemini runtime selected but GOOGLE_API_KEY not configured")
+            logger.warning(
+                "Gemini-backed runtime selected but GOOGLE_API_KEY/GEMINI_API_KEY "
+                "is not configured"
+            )
 
     # OpenTelemetry Configuration (enabled by default)
     # Claude Code has built-in OTel support - these vars enable metrics export
@@ -3009,6 +3020,12 @@ async def create_agent_internal(
     # FORK_* 4xx errors — stays OUTSIDE the docker try-block below, so those
     # errors are not flattened to a generic 500.
     tr = await _resolve_template(config, current_user)
+
+    # A local template may select a derived image. Re-run the same allowlist
+    # gate after resolution so that selection is deployable but never bypasses
+    # SEC-172. The earlier gate still rejects a bad request before any template
+    # fetch/fork side effect.
+    validate_base_image(config.base_image)
 
     # #1187: runtime is final here (request value, possibly overridden by the
     # template). Reject an unknown one now (clear 400) instead of letting the

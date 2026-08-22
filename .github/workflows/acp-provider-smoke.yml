@@ -2,39 +2,36 @@ name: acp-provider-smoke
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize]
     paths:
       - ".github/workflows/acp-provider-smoke.yml"
       - "tests/provider_smoke/**"
       - "docker/acp-harnesses/**"
       - "docker/base-image/**"
+      - "config/agent-templates/test-acp-*/**"
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: Run provider-backed Hermes and DeepSeek acceptance tests
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: acp-provider-smoke-${{ github.event.pull_request.number }}
+  group: acp-provider-smoke-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  live-provider-acceptance:
-    name: Hermes + DeepSeek live ACP acceptance
-    if: github.event.pull_request.head.ref == 'acp/03-acceptance-images'
+  image-contract:
+    name: Build and verify ACP acceptance images
     runs-on: ubuntu-latest
     timeout-minutes: 75
 
     steps:
-      - name: Check out the pull request
+      - name: Check out the requested revision
         uses: actions/checkout@v7
-
-      - name: Require provider credentials
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$GEMINI_API_KEY" || { echo "GEMINI_API_KEY is not configured"; exit 1; }
-          test -n "$DEEPSEEK_API_KEY" || { echo "DEEPSEEK_API_KEY is not configured"; exit 1; }
 
       - name: Build Trinity agent base image
         run: ./scripts/deploy/build-base-image.sh
@@ -42,13 +39,13 @@ jobs:
       - name: Build pinned ACP acceptance images
         run: |
           set -euo pipefail
-          docker build -t trinity-acp-hermes:smoke docker/acp-harnesses/hermes
-          docker build -t trinity-acp-deepseek:smoke docker/acp-harnesses/deepseek
+          docker build -t trinity-agent-base:acp-hermes docker/acp-harnesses/hermes
+          docker build -t trinity-agent-base:acp-deepseek docker/acp-harnesses/deepseek
 
       - name: Verify immutable launcher contracts
         run: |
           set -euo pipefail
-          for image in trinity-acp-hermes:smoke trinity-acp-deepseek:smoke; do
+          for image in trinity-agent-base:acp-hermes trinity-agent-base:acp-deepseek; do
             docker run --rm --entrypoint sh "$image" -c '
               test "$(stat -c %u /opt/trinity/acp/runtime.json)" = 0
               test "$(stat -c %a /opt/trinity/acp/runtime.json)" = 444
@@ -57,7 +54,18 @@ jobs:
             '
           done
 
+      - name: Require live provider credentials
+        if: github.event_name == 'workflow_dispatch' && inputs.run_live
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$GEMINI_API_KEY" || { echo "GEMINI_API_KEY is not configured"; exit 1; }
+          test -n "$DEEPSEEK_API_KEY" || { echo "DEEPSEEK_API_KEY is not configured"; exit 1; }
+
       - name: Exercise Hermes ACP against Gemini 3.7 Flash
+        if: github.event_name == 'workflow_dispatch' && inputs.run_live
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -67,10 +75,11 @@ jobs:
             -e GEMINI_API_KEY \
             -e ACP_MODEL=gemini-3.7-flash \
             -v "$PWD/tests/provider_smoke/acp_live_smoke.py:/tmp/acp_live_smoke.py:ro" \
-            trinity-acp-hermes:smoke \
+            trinity-agent-base:acp-hermes \
             python3 /tmp/acp_live_smoke.py hermes
 
       - name: Exercise DeepSeek Harness ACP against DeepSeek V4 Pro
+        if: github.event_name == 'workflow_dispatch' && inputs.run_live
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
@@ -80,5 +89,5 @@ jobs:
             -e DEEPSEEK_API_KEY \
             -e ACP_MODEL=deepseek-v4-pro \
             -v "$PWD/tests/provider_smoke/acp_live_smoke.py:/tmp/acp_live_smoke.py:ro" \
-            trinity-acp-deepseek:smoke \
+            trinity-agent-base:acp-deepseek \
             python3 /tmp/acp_live_smoke.py deepseek

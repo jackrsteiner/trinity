@@ -15,6 +15,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 RUN git clone https://github.com/deepseek-ai/deepseek-harness.git /opt/deepseek-harness && \
     cd /opt/deepseek-harness && \
     git checkout --detach "${DEEPSEEK_HARNESS_COMMIT}" && \
+    sed -i \
+      "0,/model: deepseek-v4-pro/s//model: !!js \"process.env.ACP_MODEL ?? process.env.AGENT_RUNTIME_MODEL ?? 'deepseek-v4-pro'\"/" \
+      examples/acp-agent/cordis.yml && \
+    grep -Fq 'process.env.ACP_MODEL ?? process.env.AGENT_RUNTIME_MODEL' \
+      examples/acp-agent/cordis.yml && \
     pnpm install --frozen-lockfile && \
     pnpm run build && \
     test "$(git rev-parse HEAD)" = "${DEEPSEEK_HARNESS_COMMIT}"
