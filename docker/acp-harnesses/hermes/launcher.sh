@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 
-exec hermes-acp
+exec python3 /opt/trinity/acp/hermes_compat.py
