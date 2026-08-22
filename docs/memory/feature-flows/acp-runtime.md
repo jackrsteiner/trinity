@@ -24,7 +24,9 @@ Trinity HTTP API
   -> model provider
 ```
 
-Startup sends `initialize` followed by `session/new`. A turn sends `session/prompt`; streamed `session/update` notifications become response text and Trinity tool-use/tool-result activity. Stdout is exclusively protocol traffic. Harness diagnostics belong on stderr.
+Startup sends `initialize` followed by `session/new`. A turn sends `session/prompt`; streamed `session/update` notifications become response text and, when the harness exposes ACP tool events, Trinity tool-use/tool-result activity. Stdout is exclusively protocol traffic. Harness diagnostics belong on stderr.
+
+The acceptance harnesses intentionally differ at that optional presentation boundary. Hermes exposes tool start/completion updates, which Trinity translates into its execution log. The pinned DeepSeek Harness automation transport publishes only committed assistant chunks and retains tool trace in its own session log. DeepSeek executions therefore report `tool_count: 0` even when a provider-side tool ran; live acceptance verifies the requested filesystem effect directly instead of inventing events the harness did not send.
 
 ## Lifecycle
 
