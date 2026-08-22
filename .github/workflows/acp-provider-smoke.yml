@@ -1,0 +1,84 @@
+name: acp-provider-smoke
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - ".github/workflows/acp-provider-smoke.yml"
+      - "tests/provider_smoke/**"
+      - "docker/acp-harnesses/**"
+      - "docker/base-image/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acp-provider-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  live-provider-acceptance:
+    name: Hermes + DeepSeek live ACP acceptance
+    if: github.event.pull_request.head.ref == 'acp/03-acceptance-images'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v7
+
+      - name: Require provider credentials
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$GEMINI_API_KEY" || { echo "GEMINI_API_KEY is not configured"; exit 1; }
+          test -n "$DEEPSEEK_API_KEY" || { echo "DEEPSEEK_API_KEY is not configured"; exit 1; }
+
+      - name: Build Trinity agent base image
+        run: ./scripts/deploy/build-base-image.sh
+
+      - name: Build pinned ACP acceptance images
+        run: |
+          set -euo pipefail
+          docker build -t trinity-acp-hermes:smoke docker/acp-harnesses/hermes
+          docker build -t trinity-acp-deepseek:smoke docker/acp-harnesses/deepseek
+
+      - name: Verify immutable launcher contracts
+        run: |
+          set -euo pipefail
+          for image in trinity-acp-hermes:smoke trinity-acp-deepseek:smoke; do
+            docker run --rm --entrypoint sh "$image" -c '
+              test "$(stat -c %u /opt/trinity/acp/runtime.json)" = 0
+              test "$(stat -c %a /opt/trinity/acp/runtime.json)" = 444
+              test "$(stat -c %u /opt/trinity/acp/launch)" = 0
+              test "$(stat -c %a /opt/trinity/acp/launch)" = 555
+            '
+          done
+
+      - name: Exercise Hermes ACP against Gemini 3.7 Flash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --name trinity-acp-hermes-smoke \
+            -e GEMINI_API_KEY \
+            -e ACP_MODEL=gemini-3.7-flash \
+            -v "$PWD/tests/provider_smoke/acp_live_smoke.py:/tmp/acp_live_smoke.py:ro" \
+            trinity-acp-hermes:smoke \
+            python3 /tmp/acp_live_smoke.py hermes
+
+      - name: Exercise DeepSeek Harness ACP against DeepSeek V4 Pro
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --name trinity-acp-deepseek-smoke \
+            -e DEEPSEEK_API_KEY \
+            -e ACP_MODEL=deepseek-v4-pro \
+            -v "$PWD/tests/provider_smoke/acp_live_smoke.py:/tmp/acp_live_smoke.py:ro" \
+            trinity-acp-deepseek:smoke \
+            python3 /tmp/acp_live_smoke.py deepseek
