@@ -354,3 +354,31 @@ Composition paths and whether the model is known:
   #1521's context-window "safe floor").
 
 ---
+
+## 42. Generic Agent Client Protocol Runtime
+
+- **ACP-001 — Explicit selection:** `runtime.type: acp` resolves only to the
+  generic ACP adapter; unknown runtimes fail loud and ACP never falls through to
+  Claude health, terminal, MCP, or execution paths.
+- **ACP-002 — Trusted launcher:** the manifest and launcher are regular,
+  root-owned, non-writable files reached through root-owned, non-writable parent
+  directories. Manifest parsing is bounded and reads the validated descriptor.
+- **ACP-003 — Protocol purity:** stdout carries newline-delimited ACP JSON-RPC
+  only; malformed, oversized, or prematurely closed transport fails explicitly.
+- **ACP-004 — Lifecycle:** Chat supports in-process continuity and reset;
+  headless executions are process/session isolated and registered for process-
+  group cancellation and bounded cleanup.
+- **ACP-005 — Conservative capability contract:** MCP, persisted Session-tab
+  resume, image input, portable `allowed_tools`/`max_turns`, and cost reporting
+  remain unavailable until implemented without widening caller restrictions.
+- **ACP-006 — Security parity:** credentials use the per-spawn environment and
+  sanitizer; model selection propagates per process; read-only fails closed;
+  common wall-clock guardrails apply and unmappable controls are surfaced.
+- **ACP-007 — Error contract:** rate/auth/timeout/transport/unsupported failures
+  map to 429/503/504/502/422 respectively; unknown failures remain 500.
+- **ACP-008 — Deployability:** acceptance images use allowed
+  `trinity-agent-base:*` tags, templates select the required derived image, and
+  pull-request CI builds/verifies them without secrets. Provider-backed tests are
+  an explicit manual workflow using repository Actions secrets.
+
+---

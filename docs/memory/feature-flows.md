@@ -231,6 +231,7 @@
 | Unified Channel Access Control | [unified-channel-access-control.md](feature-flows/unified-channel-access-control.md) | Cross-channel access gate keyed on verified email — policy, /login, access requests (#311) |
 | VoIP Telephony | [voip-telephony.md](feature-flows/voip-telephony.md) | Outbound phone calls over the Gemini Live bridge via Twilio Media Streams; per-agent voice binding, ticket-authed WS, post-call transcript processing. Flag-gated default OFF (VOIP-001, #1056) |
 | OpenAI Codex Runtime | [codex-runtime.md](feature-flows/codex-runtime.md) | Third agent runtime ("harness == runtime") — `codex exec` engine with full safety parity (system prompt, read-only sandbox, guardrails, sanitization), `RuntimeCapabilities`, Session-tab gate, MCP via config.toml. See also the [Harness Authoring Guide](harness-authoring-guide.md) (#1187) |
+| Generic ACP Runtime | [acp-runtime.md](feature-flows/acp-runtime.md) | Harness-neutral Agent Client Protocol runtime with trusted derived-image launchers, conservative capability gates, model propagation, fork-safe image CI, and Hermes/DeepSeek live acceptance |
 | Nevermined x402 Payments | [nevermined-payments.md](feature-flows/nevermined-payments.md) | Per-agent paid API via x402 payment protocol (NVM-001) |
 | WhatsApp Integration | [whatsapp-integration.md](feature-flows/whatsapp-integration.md) | Per-agent WhatsApp via Twilio (WHATSAPP-001) |
 

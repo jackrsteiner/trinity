@@ -1,59 +1,91 @@
-# Generic ACP runtime
+# Generic ACP Runtime
 
-## Purpose
+## Overview
 
-`runtime: { type: acp }` lets Trinity drive any compatible Agent Client Protocol server without adding harness-specific branches to the agent server. Hermes and DeepSeek Harness are acceptance images; neither has a bespoke Trinity runtime class.
+`runtime: { type: acp }` lets Trinity drive a compatible Agent Client Protocol
+server without a harness-specific runtime class. Hermes and DeepSeek Harness are
+pinned acceptance images. The common runtime owns JSON-RPC transport, lifecycle,
+Trinity metadata, cancellation, sanitization, and conservative capabilities.
 
-## Trust boundary
+## User Story
 
-The derived image supplies:
+As a Trinity operator, I can build or select a trusted ACP-derived agent image,
+inject that harness's provider credential, and use ordinary Chat and headless task
+surfaces without teaching Trinity about the provider implementation.
 
-- `/opt/trinity/acp/runtime.json`, mode `0444`, owned by root;
-- `/opt/trinity/acp/launch`, mode `0555`, owned by root.
+## Entry Points
 
-The generic runtime opens both without following symlinks and refuses a non-regular, non-root-owned, or group/world-writable file. The manifest contains only the immutable launcher command, working directory, permission policy, and whether the harness can enforce Trinity read-only mode. Credentials remain runtime environment variables; they never belong in the manifest or image layers.
+- `POST /api/chat` keeps a process/session for conversational continuity.
+- `POST /api/task` creates an isolated process/session per execution.
+- `GET /api/model` and `PUT /api/model` report or update the provider model id.
+- `GET /api/runtime/capabilities` reports the common-denominator contract.
+- `DELETE /api/chat/history` terminates and resets the retained ACP session.
 
-## Execution flow
+## Frontend Layer
 
-```text
-Trinity HTTP API
-  -> AgentRuntime factory
-  -> ACPRuntime
-  -> root-owned launcher
-  -> harness ACP server over JSON-RPC stdio
-  -> model provider
-```
+`RuntimeBadge.vue` labels ACP agents explicitly. `AgentTerminal.vue` opens a
+diagnostic shell because ACP is a protocol server, not an interactive CLI; it
+must never fall through to Claude Code. Model display defaults to
+`acp-provider-default` until the template or operator supplies a provider id.
 
-Startup sends `initialize` followed by `session/new`. A turn sends `session/prompt`; streamed `session/update` notifications become response text and, when the harness exposes ACP tool events, Trinity tool-use/tool-result activity. Stdout is exclusively protocol traffic. Harness diagnostics belong on stderr.
+## Backend Layer
 
-The acceptance harnesses intentionally differ at that optional presentation boundary. Hermes exposes tool start/completion updates, which Trinity translates into its execution log. The pinned DeepSeek Harness automation transport publishes only committed assistant chunks and retains tool trace in its own session log. DeepSeek executions therefore report `tool_count: 0` even when a provider-side tool ran; live acceptance verifies the requested filesystem effect directly instead of inventing events the harness did not send.
+The backend accepts `acp` as a non-Claude runtime, passes `AGENT_RUNTIME_MODEL`,
+and composes an ACP-specific platform prompt with MCP-only sections removed.
+Generic ACP advertises `mcp_support=false`, so neither Trinity MCP injection nor
+template MCP configuration may fall through to Claude's configuration path.
 
-## Lifecycle
+Inside the agent image, `ACPRuntime` opens a root-owned manifest and launcher,
+sends `initialize` and `session/new`, then exchanges `session/prompt` and
+`session/update` messages over newline-delimited JSON-RPC stdio. Stdout is
+protocol-only; harness diagnostics belong on stderr. `ACP_MODEL` is supplied to
+the child process for each selected model.
 
-- Ordinary `/api/chat` turns retain one ACP subprocess and session so continuity works without protocol-level session reload.
-- `DELETE /api/chat/history` calls the runtime reset hook, terminates that subprocess, and drops its ACP session.
-- Every headless task gets its own subprocess and ACP session. The process registry associates it with the Trinity execution ID so cancellation signals the correct process group.
-- Persisted Session-tab resume is not advertised. DeepSeek's acceptance server creates fresh sessions, so the common-denominator runtime does not claim `session/load` behavior.
+## Side Effects
 
-## Authority and fail-closed behavior
+- Chat retains one subprocess until reset, model change, failure, or shutdown.
+- Headless tasks register their process group by execution id for cancellation.
+- Hermes writes a key-free provider configuration under `~/.hermes`; credentials
+  remain environment variables.
+- The DeepSeek launcher maps Trinity read-only mode to
+  `DSH_PERMISSION_MODE=read-only` and stores harness sessions in the agent home.
 
-ACP `session/request_permission` is reverse JSON-RPC. The trusted manifest chooses `allow` or `reject`; model text cannot change that policy.
+## Error Handling
 
-Read-only mode is accepted only when the manifest declares harness enforcement. Trinity passes `TRINITY_READ_ONLY=1` to that launcher. The DeepSeek launcher translates it to `DSH_PERMISSION_MODE=read-only`; the Hermes image declares read-only unsupported, so execution is rejected before a provider call.
+Provider rate limits map to HTTP 429, authentication failures to 503, timeouts to
+504, protocol pipe failures to 502, unsupported portable restrictions to 422,
+and other execution failures to 500. Messages pass through Trinity's credential
+sanitizer before logs, responses, or metadata. A dead retained process is dropped
+so the next chat can establish a new session.
 
-The common runtime does not claim request-level mappings for `allowed_tools`, `max_turns`, image input, or persisted resume. A caller that requests one of those restrictions gets an explicit error rather than a silently broadened execution.
+## Security Considerations
 
-## Declared capabilities
+The derived image supplies `/opt/trinity/acp/runtime.json` (root:root, `0444`) and
+`/opt/trinity/acp/launch` (root:root, `0555`). Trinity opens without following
+symlinks, bounds the manifest to 64 KiB, validates the same file descriptor it
+reads, and rejects writable or non-root-owned pathname parents and files.
 
-| Capability | ACP value |
-|---|---|
-| Chat continuity | yes |
-| Session-tab persisted resume | no |
-| MCP configuration | no |
-| Cost reporting | unavailable |
+ACP reverse permission requests obey the immutable manifest policy. Read-only is
+accepted only when the manifest declares harness enforcement. Generic ACP cannot
+portably enforce `allowed_tools`, request-level `max_turns`, image input, persisted
+Session-tab resume, or MCP; requests for those features fail closed. Common
+wall-clock guardrails are enforced, while unmappable tool and turn controls are
+logged explicitly. Credentials never belong in manifests, images, or CI logs.
 
-Harness-specific installation, model selection, and security translation stay in `docker/acp-harnesses/<name>/`.
+## Testing
 
-## Cost telemetry
+Unit tests cover manifest trust, protocol lifecycle, permission responses, tool
+event translation, model propagation, status mapping, prompt/MCP gating, template
+selection, and Hermes configuration. Pull requests build both pinned images and
+verify immutable files without provider secrets. A manually dispatched workflow
+with `run_live=true` performs provider-backed inference, tool use, continuity,
+parallel isolation, read-only behavior, and cancellation for Hermes/Gemini and
+DeepSeek Harness.
 
-ACP does not provide a portable monetary-cost field, and the generic runtime cannot safely infer provider pricing from harness-specific events. `cost_reporting` is therefore `unavailable` and `ExecutionMetadata.cost_usd` remains `null`. Consumers must distinguish this from a real zero-dollar execution; provider billing remains authoritative until ACP standardizes trustworthy usage or cost telemetry.
+## Related Flows
+
+- [ACP deployment guide](../../ACP_RUNTIME.md)
+- [OpenAI Codex runtime](codex-runtime.md)
+- [Harness authoring guide](harness-authoring-guide.md)
+- [Execution termination](execution-termination.md)
+- [Credential injection](credential-injection.md)
