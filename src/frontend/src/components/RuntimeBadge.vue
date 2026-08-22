@@ -153,7 +153,7 @@ const badgeClasses = computed(() => {
     return 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
   }
   if (isAcpRuntime.value) {
-    return 'bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800'
+    return 'bg-brand-acp-50 dark:bg-brand-acp-950/50 text-brand-acp-700 dark:text-brand-acp-300 border border-brand-acp-200 dark:border-brand-acp-800'
   }
   return 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-600'
 })

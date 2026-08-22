@@ -380,5 +380,15 @@ Composition paths and whether the model is known:
   `trinity-agent-base:*` tags, templates select the required derived image, and
   pull-request CI builds/verifies them without secrets. Provider-backed tests are
   an explicit manual workflow using repository Actions secrets.
+- **ACP-009 — Honest negotiation:** Trinity accepts only ACP protocol v1 and
+  environment-authenticated sessions. It rejects version mismatches and malformed
+  authentication/capability metadata; advertised login choices remain compatible
+  with an already-injected key, while a session that actually requires interactive
+  login fails explicitly. Reverse filesystem/terminal methods remain unsupported
+  until their request handlers exist.
+- **ACP-010 — Bounded, terminal lifecycle:** pending, in-progress, and status-less
+  tool updates never complete an activity; only terminal status does, at most
+  once. The aggregate protocol transcript and stderr logging are bounded, and
+  any framing/request failure discards the retained connection before recovery.
 
 ---

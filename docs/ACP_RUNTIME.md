@@ -45,6 +45,10 @@ and checks the immutable manifest/launcher contract without secrets. To run live
 3. The workflow reads `GEMINI_API_KEY` and `DEEPSEEK_API_KEY` from repository
    Actions secrets and does not print keys or model responses.
 
+The provider-backed job is manual-only. Pull requests run the secretless image
+build and contract checks; they cannot consume repository secrets. Run the live
+job only on a trusted ref in a repository you control.
+
 ## Current portable contract
 
 Chat continuity, isolated headless turns, cancellation, provider model selection,
@@ -52,3 +56,12 @@ and common wall-clock guardrails are supported. Persisted Session-tab resume,
 portable MCP configuration, image input, per-request allowed tools/max turns, and
 portable cost reporting are deliberately unavailable. Unsupported restrictions
 return an explicit error rather than silently widening execution.
+
+The current interoperability baseline is ACP protocol v1 with provider
+credentials supplied through the process environment. Agents that select another
+protocol version are rejected explicitly. Advertised login choices are allowed
+when the injected credential is already active; a session that actually requires
+an interactive ACP login fails explicitly because this headless runtime cannot
+complete that flow.
+Trinity does not advertise reverse filesystem or terminal callbacks; the agent's
+own tools operate on the mounted workspace instead.

@@ -39,7 +39,13 @@ Inside the agent image, `ACPRuntime` opens a root-owned manifest and launcher,
 sends `initialize` and `session/new`, then exchanges `session/prompt` and
 `session/update` messages over newline-delimited JSON-RPC stdio. Stdout is
 protocol-only; harness diagnostics belong on stderr. `ACP_MODEL` is supplied to
-the child process for each selected model.
+the child process for each selected model. Trinity's baseline accepts ACP v1
+with environment-provided credentials: a different negotiated version or
+malformed authentication/capability metadata fails initialization. An agent may
+still advertise login choices while an injected key is already active; Trinity
+continues to `session/new`, and maps an actual `auth_required` response to the
+provider-auth error. The client advertises reverse filesystem and terminal
+methods as unsupported because it does not implement those server-to-client RPCs.
 
 ## Side Effects
 
@@ -54,9 +60,11 @@ the child process for each selected model.
 
 Provider rate limits map to HTTP 429, authentication failures to 503, timeouts to
 504, protocol pipe failures to 502, unsupported portable restrictions to 422,
-and other execution failures to 500. Messages pass through Trinity's credential
-sanitizer before logs, responses, or metadata. A dead retained process is dropped
-so the next chat can establish a new session.
+and other execution failures to 500. A cancelled ACP stop reason is surfaced as
+a cancelled request rather than success. Messages pass through Trinity's
+credential sanitizer before logs, responses, or metadata. Any request or framing
+failure drops the retained process—even if it is still alive—so the next chat
+establishes a clean session instead of reading a desynchronized stream.
 
 ## Security Considerations
 
@@ -65,7 +73,8 @@ The derived image supplies `/opt/trinity/acp/runtime.json` (root:root, `0444`) a
 symlinks, bounds the manifest to 64 KiB, validates the same file descriptor it
 reads, and rejects writable or non-root-owned pathname parents and files.
 
-ACP reverse permission requests obey the immutable manifest policy. Read-only is
+ACP reverse permission requests obey the immutable manifest policy and prefer a
+one-time grant over a durable grant. Read-only is
 accepted only when the manifest declares harness enforcement. Generic ACP cannot
 portably enforce `allowed_tools`, request-level `max_turns`, image input, persisted
 Session-tab resume, or MCP; requests for those features fail closed. Common
@@ -74,9 +83,11 @@ logged explicitly. Credentials never belong in manifests, images, or CI logs.
 
 ## Testing
 
-Unit tests cover manifest trust, protocol lifecycle, permission responses, tool
-event translation, model propagation, status mapping, prompt/MCP gating, template
-selection, and Hermes configuration. Pull requests build both pinned images and
+Unit tests cover manifest trust, protocol negotiation and advertised capabilities,
+protocol lifecycle/recovery, permission responses, progressive tool event
+translation, cancellation stop reasons, transcript bounds, model propagation,
+status mapping, prompt/MCP gating, template selection, and Hermes configuration.
+Pull requests build both pinned images and
 verify immutable files without provider secrets. A manually dispatched workflow
 with `run_live=true` performs provider-backed inference, tool use, continuity,
 parallel isolation, read-only behavior, and cancellation for Hermes/Gemini and
