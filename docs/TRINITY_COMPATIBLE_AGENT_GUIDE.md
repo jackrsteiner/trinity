@@ -61,6 +61,10 @@ description: "What this agent does"
 resources:
   cpu: "2"                        # CPU cores (string)
   memory: "4g"                    # Memory limit (e.g., "2g", "4g", "8g")
+
+# Optional derived runtime image. Must match the platform's base-image
+# allowlist (the built-in default accepts trinity-agent-base:*).
+base_image: trinity-agent-base:latest
 ```
 
 See [template.yaml Schema](#templateyaml-schema) for complete field reference.
@@ -463,7 +467,7 @@ resources:
 # === RUNTIME CONFIGURATION (Optional) ===
 # Defaults to Claude Code if not specified
 runtime:
-  type: claude-code               # "claude-code" or "gemini-cli"
+  type: claude-code               # claude-code, gemini-cli, codex, or acp
   model: sonnet                   # Optional model override (e.g., "gemini-2.5-pro")
 
 # === CREDENTIAL SCHEMA ===
