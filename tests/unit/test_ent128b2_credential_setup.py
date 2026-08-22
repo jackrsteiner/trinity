@@ -158,6 +158,48 @@ def test_wellformed_credentials_still_drive_mcp_servers(monkeypatch, tmp_path):
     assert sorted(config.mcp_servers) == ["linear", "stripe"]
 
 
+def test_local_template_selects_derived_base_image(monkeypatch, tmp_path):
+    from services.agent_service import crud
+
+    curated = tmp_path / "curated"
+    deployed = tmp_path / "deployed"
+    deployed.mkdir()
+    _write_template(
+        curated,
+        "acp-image",
+        "name: acp-image\n"
+        "base_image: trinity-agent-base:acp-hermes\n"
+        "resources:\n  cpu: '2'\n  memory: '4g'\n"
+        "runtime:\n  type: acp\n  model: gemini-3.7-flash\n",
+    )
+    _patch_roots(monkeypatch, curated, deployed)
+
+    config = _config("local:acp-image")
+    crud._resolve_local_template(config)
+
+    assert config.base_image == "trinity-agent-base:acp-hermes"
+    assert config.runtime == "acp"
+    assert config.runtime_model == "gemini-3.7-flash"
+
+
+def test_acp_hermes_receives_platform_gemini_key(monkeypatch):
+    from services.agent_service import crud
+    from models import AgentConfig
+
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "platform-gemini-key")
+    config = AgentConfig(
+        name="acp-hermes",
+        runtime="acp",
+        base_image="trinity-agent-base:acp-hermes",
+    )
+    env_vars = {}
+
+    crud._apply_gemini_and_otel_env(config, env_vars)
+
+    assert env_vars["GEMINI_API_KEY"] == "platform-gemini-key"
+
+
 # ===========================================================================
 # Defect 1 — the agent image's `GET /api/template/info`, and its parity guard
 # ===========================================================================

@@ -1,0 +1,36 @@
+name: test-acp-deepseek
+hidden: true
+display_name: Test ACP DeepSeek Harness Agent
+description: Generic ACP acceptance agent using DeepSeek Harness
+version: "1.0.0"
+author: Trinity Platform
+priority: 10
+
+base_image: trinity-agent-base:acp-deepseek
+
+runtime:
+  type: acp
+  model: deepseek-v4-pro
+
+resources:
+  cpu: "2"
+  memory: "4g"
+
+capabilities:
+  - chat
+  - code-generation
+
+mcp_servers: []
+
+credentials:
+  env_file:
+    - DEEPSEEK_API_KEY
+
+credential_setup:
+  - name: DEEPSEEK_API_KEY
+    title: DeepSeek API key
+    description: Authenticates DeepSeek Harness provider calls.
+    required: true
+    secret: true
+    format: secret
+    setup_url: https://platform.deepseek.com/api_keys

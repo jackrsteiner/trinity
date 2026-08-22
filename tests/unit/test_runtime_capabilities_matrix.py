@@ -11,6 +11,7 @@ from __future__ import annotations
 from agent_server.services.runtime_adapter import AgentRuntime
 from agent_server.services.codex_runtime import CodexRuntime
 from agent_server.services.claude_code import ClaudeCodeRuntime
+from agent_server.services.acp_runtime import ACPRuntime
 from agent_server.services.gemini_runtime import GeminiRuntime
 
 
@@ -43,6 +44,14 @@ def test_codex_matches_gemini_shape_for_resume_and_cost():
     assert caps.session_tab_resume is False   # MVP: Session tab stays Claude/Gemini
     assert caps.mcp_support is True
     assert caps.cost_reporting == "estimated"
+
+
+def test_acp_declares_only_portable_capabilities():
+    caps = ACPRuntime.capabilities()
+    assert caps.chat_continuity is True
+    assert caps.session_tab_resume is False
+    assert caps.mcp_support is False
+    assert caps.cost_reporting == "unavailable"
 
 
 def test_capabilities_to_dict_is_serializable_for_callers():

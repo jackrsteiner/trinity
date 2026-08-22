@@ -51,7 +51,7 @@ def is_claude_runtime(runtime: Optional[str]) -> bool:
 # #1187: every runtime the platform can launch. Mirrors the agent-side
 # `runtime_adapter.KNOWN_RUNTIMES` (which lives in the base image and isn't
 # importable from the backend). Keep the two in sync when adding a runtime.
-KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset({"gemini-cli", "gemini", "codex"})
+KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset({"gemini-cli", "gemini", "codex", "acp"})
 
 
 def validate_runtime(runtime: Optional[str]) -> None:

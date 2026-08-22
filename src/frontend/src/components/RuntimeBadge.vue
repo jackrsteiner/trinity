@@ -65,6 +65,23 @@
       <polyline points="16 9 19 12 16 15" />
     </svg>
 
+    <!-- Agent Client Protocol (connected nodes) -->
+    <svg
+      v-else-if="isAcpRuntime"
+      class="w-3.5 h-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+    >
+      <circle cx="5" cy="12" r="2.5" />
+      <circle cx="19" cy="6" r="2.5" />
+      <circle cx="19" cy="18" r="2.5" />
+      <path d="M7.5 11 16.5 7" />
+      <path d="M7.5 13 16.5 17" />
+    </svg>
+
     <!-- Label -->
     <span v-if="showLabel">{{ label }}</span>
   </span>
@@ -105,10 +122,15 @@ const isCodexRuntime = computed(() => {
   return props.runtime === 'codex'
 })
 
+const isAcpRuntime = computed(() => {
+  return props.runtime === 'acp'
+})
+
 const label = computed(() => {
   if (isClaudeRuntime.value) return 'Claude'
   if (isGeminiRuntime.value) return 'Gemini'
   if (isCodexRuntime.value) return 'Codex'
+  if (isAcpRuntime.value) return 'ACP'
   return props.runtime
 })
 
@@ -116,6 +138,7 @@ const tooltipText = computed(() => {
   if (isClaudeRuntime.value) return 'Anthropic Claude Code Runtime'
   if (isGeminiRuntime.value) return 'Google Gemini CLI Runtime'
   if (isCodexRuntime.value) return 'OpenAI Codex CLI Runtime'
+  if (isAcpRuntime.value) return 'Agent Client Protocol Runtime'
   return `Runtime: ${props.runtime}`
 })
 
@@ -129,7 +152,9 @@ const badgeClasses = computed(() => {
   if (isCodexRuntime.value) {
     return 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
   }
+  if (isAcpRuntime.value) {
+    return 'bg-brand-acp-50 dark:bg-brand-acp-950/50 text-brand-acp-700 dark:text-brand-acp-300 border border-brand-acp-200 dark:border-brand-acp-800'
+  }
   return 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-600'
 })
 </script>
-

@@ -137,7 +137,9 @@ const errorMessage = ref('')
 // Computed - Runtime-aware labels
 const isGemini = computed(() => props.runtime === 'gemini-cli' || props.runtime === 'gemini')
 const isCodex = computed(() => props.runtime === 'codex')
+const isAcp = computed(() => props.runtime === 'acp')
 const cliModeLabel = computed(() => {
+  if (isAcp.value) return 'ACP Harness Shell'
   if (isCodex.value) return 'Codex CLI'
   if (isGemini.value) return 'Gemini CLI'
   return 'Claude Code'
@@ -331,7 +333,9 @@ function connect() {
   // Build WebSocket URL - use agent-specific terminal endpoint
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
   // Map 'cli' mode to the appropriate runtime command (claude, gemini, or codex)
-  const cliRuntimeMode = isCodex.value ? 'codex' : (isGemini.value ? 'gemini' : 'claude')
+  // Generic ACP is a protocol server rather than an interactive CLI. Open a
+  // shell for diagnostics instead of accidentally launching Claude Code.
+  const cliRuntimeMode = isAcp.value ? 'bash' : (isCodex.value ? 'codex' : (isGemini.value ? 'gemini' : 'claude'))
   const terminalMode = selectedMode.value === 'cli' ? cliRuntimeMode : 'bash'
   // Include model parameter if specified (for gemini --model or claude --model flags)
   const modelParam = props.model ? `&model=${encodeURIComponent(props.model)}` : ''

@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # resume/fallback/reaping model, so we run a stateless turn for them instead.
 # ONE backend constant — keep in sync with the agent-side
 # `RuntimeCapabilities.session_tab_resume`.
-RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex"}
+RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex", "acp"}
 
 
 def supports_session_resume(agent_name: str) -> bool:

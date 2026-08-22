@@ -1,0 +1,27 @@
+name: test-acp-hermes
+hidden: true
+display_name: Test ACP Hermes Agent
+description: Generic ACP acceptance agent using Hermes against Google Gemini
+version: "1.0.0"
+author: Trinity Platform
+priority: 10
+
+base_image: trinity-agent-base:acp-hermes
+
+runtime:
+  type: acp
+  model: gemini-3.7-flash
+
+resources:
+  cpu: "2"
+  memory: "4g"
+
+capabilities:
+  - chat
+  - code-generation
+
+mcp_servers: []
+
+# Trinity injects its configured GEMINI_API_KEY/GOOGLE_API_KEY for this pinned
+# Gemini-backed image; platform-injected values must not be operator prompts.
+credentials: {}

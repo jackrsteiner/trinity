@@ -296,6 +296,21 @@ def render_platform_instructions(tier: PromptTier = PromptTier.VERBOSE) -> str:
 # Mirrors runtime_adapter._CODEX_RUNTIMES (the only non-Claude-named surface in
 # the MVP); Gemini and unknown runtimes keep the canonical Claude naming.
 _CODEX_RUNTIMES = frozenset({"codex"})
+_ACP_RUNTIMES = frozenset({"acp"})
+
+# Generic ACP deliberately advertises no MCP support until the protocol/runtime
+# can pass Trinity's authenticated MCP transport through portably. Remove the
+# tool-only sections instead of teaching the model calls it cannot make.
+_ACP_MCP_SECTIONS = _MINIMAL_DROP_SECTIONS | frozenset({
+    "Remembering Things About Users (Public & Channel Sessions)",
+})
+_ACP_MCP_ORIENTATION = (
+    "## MCP availability (generic ACP runtime)\n\n"
+    "Trinity MCP tools are not connected to this generic ACP harness. Do not "
+    "claim to call collaboration, file-sharing, report, or user-memory tools. "
+    "The workspace and operator-queue file contracts remain available."
+    "\n\n---\n\n"
+)
 
 # Prepended to the Codex variant. Intentionally avoids the literal
 # ``mcp__trinity__`` token so the stripped prompt contains it nowhere.
@@ -317,7 +332,15 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     orientation note. Claude/Gemini/unknown → return the text unchanged (the
     plan's ``default claude-code`` behavior). Pure — never mutates the input.
     """
-    if (runtime or "").lower() in _CODEX_RUNTIMES:
+    runtime_name = (runtime or "").lower()
+    if runtime_name in _ACP_RUNTIMES:
+        kept = [
+            chunk
+            for heading, chunk in _iter_sections(instructions)
+            if heading not in _ACP_MCP_SECTIONS
+        ]
+        return _ACP_MCP_ORIENTATION + _SECTION_DELIMITER.join(kept)
+    if runtime_name in _CODEX_RUNTIMES:
         return _CODEX_MCP_ORIENTATION + instructions.replace("mcp__trinity__", "")
     return instructions
 
