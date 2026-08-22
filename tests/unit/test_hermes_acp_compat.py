@@ -126,3 +126,37 @@ def test_provider_config_uses_runtime_model_without_persisting_key(tmp_path, mon
     assert "must-not-be-written" not in config_path.read_text(encoding="utf-8")
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(config_path.parent.stat().st_mode) == 0o700
+
+
+def test_terminal_auth_is_removed_but_provider_auth_is_retained(monkeypatch):
+    provider = SimpleNamespace(type="agent", id="gemini")
+    terminal = SimpleNamespace(type="terminal", id="hermes-setup")
+    server = ModuleType("acp_adapter.server")
+    server.build_auth_methods = lambda: [provider, terminal]
+    package = ModuleType("acp_adapter")
+    package.server = server
+    monkeypatch.setitem(sys.modules, "acp_adapter", package)
+    monkeypatch.setitem(sys.modules, "acp_adapter.server", server)
+
+    compat = _load_compat()
+    compat.install_auth_capability_bridge()
+
+    assert server.build_auth_methods() == [provider]
+
+
+def test_cancelled_none_response_is_normalized(monkeypatch):
+    class FakeAgent:
+        def run_conversation(self, *_args, **_kwargs):
+            return {"final_response": None, "interrupted": True}
+
+    run_agent = ModuleType("run_agent")
+    run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", run_agent)
+
+    compat = _load_compat()
+    compat.install_cancel_response_bridge()
+
+    assert FakeAgent().run_conversation() == {
+        "final_response": "",
+        "interrupted": True,
+    }

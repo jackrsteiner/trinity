@@ -4,8 +4,9 @@
 
 `runtime: { type: acp }` lets Trinity drive a compatible Agent Client Protocol
 server without a harness-specific runtime class. Hermes and DeepSeek Harness are
-pinned acceptance images. The common runtime owns JSON-RPC transport, lifecycle,
-Trinity metadata, cancellation, sanitization, and conservative capabilities.
+version-pinned acceptance harnesses built on the current Trinity base image. The
+common runtime owns JSON-RPC transport, lifecycle, Trinity metadata,
+cancellation, sanitization, and conservative capabilities.
 
 ## User Story
 
@@ -37,20 +38,36 @@ template MCP configuration may fall through to Claude's configuration path.
 
 Inside the agent image, `ACPRuntime` opens a root-owned manifest and launcher,
 sends `initialize` and `session/new`, then exchanges `session/prompt` and
-`session/update` messages over newline-delimited JSON-RPC stdio. Stdout is
+`session/update` messages over newline-delimited JSON-RPC stdio, accepting both
+single messages and JSON-RPC batches. Stdout is
 protocol-only; harness diagnostics belong on stderr. `ACP_MODEL` is supplied to
 the child process for each selected model. Trinity's baseline accepts ACP v1
 with environment-provided credentials: a different negotiated version or
-malformed authentication/capability metadata fails initialization. An agent may
+malformed authentication/capability metadata fails initialization. Trinity
+advertises `auth.terminal=false`; every auth method needs `id` and `name`, and a
+terminal auth method is rejected as a negotiation violation. An agent may
 still advertise login choices while an injected key is already active; Trinity
 continues to `session/new`, and maps an actual `auth_required` response to the
 provider-auth error. The client advertises reverse filesystem and terminal
 methods as unsupported because it does not implement those server-to-client RPCs.
+The pinned Hermes acceptance image filters Hermes' registry-oriented terminal
+setup method at its compatibility entrypoint while preserving the detected
+provider credential method; the generic runtime itself remains fail-closed.
+The same pinned-image shim normalizes Hermes 0.19.0's null interrupted response
+so its own ACP adapter can emit `stopReason=cancelled`; it does not reinterpret a
+non-cancel result. Manifest validation is isolated from the services package so
+the agent's boot health check does not enter the global-state import cycle.
+The adapter intentionally implements this bounded v1 subset at Trinity's existing
+process/registry/sanitizer seam instead of adding the optional ACP Python SDK to
+every base image. Protocol-contract fixtures derived from the v1 schema cover the
+implemented messages; new ACP methods or capabilities require requirements,
+handlers, and negative tests before Trinity advertises them.
 
 ## Side Effects
 
 - Chat retains one subprocess until reset, model change, failure, or shutdown.
-- Headless tasks register their process group by execution id for cancellation.
+- Executions are tracked by id so termination first sends `session/cancel` and
+  waits briefly for `stopReason=cancelled`; process-group signals are the fallback.
 - Hermes writes a key-free provider configuration under `~/.hermes`; credentials
   remain environment variables.
 - The DeepSeek launcher maps Trinity read-only mode to
@@ -60,11 +77,13 @@ methods as unsupported because it does not implement those server-to-client RPCs
 
 Provider rate limits map to HTTP 429, authentication failures to 503, timeouts to
 504, protocol pipe failures to 502, unsupported portable restrictions to 422,
-and other execution failures to 500. A cancelled ACP stop reason is surfaced as
-a cancelled request rather than success. Messages pass through Trinity's
-credential sanitizer before logs, responses, or metadata. Any request or framing
-failure drops the retained process—even if it is still alive—so the next chat
-establishes a clean session instead of reading a desynchronized stream.
+and other execution failures to 500. Only `end_turn` succeeds; token/request
+limits and refusal fail, cancellation stays cancelled, and a missing or unknown
+reason is a protocol error. Messages pass through Trinity's credential sanitizer
+before persisted logs, live SSE, activity tracking, responses, or metadata. Any
+request or framing failure drops the retained process—even if it is still alive—
+so the next chat establishes a clean session instead of reading a desynchronized
+stream. Any tool activity still open when the prompt ends is closed as failed.
 
 ## Security Considerations
 
@@ -79,19 +98,22 @@ accepted only when the manifest declares harness enforcement. Generic ACP cannot
 portably enforce `allowed_tools`, request-level `max_turns`, image input, persisted
 Session-tab resume, or MCP; requests for those features fail closed. Common
 wall-clock guardrails are enforced, while unmappable tool and turn controls are
-logged explicitly. Credentials never belong in manifests, images, or CI logs.
+logged explicitly. `usage_update` supplies authoritative context usage/window
+when available; its cumulative USD cost is converted to a per-turn delta.
+Credentials never belong in manifests, images, or CI logs.
 
 ## Testing
 
 Unit tests cover manifest trust, protocol negotiation and advertised capabilities,
-protocol lifecycle/recovery, permission responses, progressive tool event
-translation, cancellation stop reasons, transcript bounds, model propagation,
-status mapping, prompt/MCP gating, template selection, and Hermes configuration.
-Pull requests build both pinned images and
-verify immutable files without provider secrets. A manually dispatched workflow
-with `run_live=true` performs provider-backed inference, tool use, continuity,
-parallel isolation, read-only behavior, and cancellation for Hermes/Gemini and
-DeepSeek Harness.
+single/batch transport, protocol lifecycle/recovery, permission responses,
+progressive tool event translation and cleanup, live-stream credential redaction,
+all stop reasons, usage telemetry, protocol cancellation, transcript bounds,
+model propagation, status mapping, prompt/MCP gating, template selection, and
+Hermes configuration. Pull requests build both harness images and verify immutable
+files without provider secrets. A manual default-branch dispatch or trusted fork-
+owner branch push performs provider-backed inference, tool use, continuity,
+parallel isolation, read-only behavior, and ACP cancellation for Hermes/Gemini
+and DeepSeek Harness, with the exact SHA in the Actions run name.
 
 ## Related Flows
 

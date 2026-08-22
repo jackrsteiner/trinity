@@ -11,9 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
-import stat
 import subprocess
 import threading
 import time
@@ -25,15 +25,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
+from ..acp_manifest import (
+    ACP_MANIFEST,
+    ACPManifest,
+    load_acp_manifest as _load_manifest,
+)
+from ..model_context import resolve_context_window
 from ..models import ExecutionLogEntry, ExecutionMetadata
 from ..utils.credential_sanitizer import (
-    sanitize_dict,
     sanitize_subprocess_line,
     sanitize_text,
 )
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
-from .activity_tracking import complete_tool_execution, start_tool_execution
 from .execution_env import build_execution_env
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
@@ -41,19 +45,38 @@ from .subprocess_lifecycle import _capture_pgid, _drain_bounded
 
 logger = logging.getLogger(__name__)
 
-ACP_MANIFEST = Path(os.getenv("TRINITY_ACP_MANIFEST", "/opt/trinity/acp/runtime.json"))
+
+def start_tool_execution(tool_id: str, tool: str, input_data: Dict[str, Any]) -> None:
+    """Load activity tracking lazily to avoid AgentState's boot import cycle."""
+    from .activity_tracking import start_tool_execution as track_start
+
+    track_start(tool_id, tool, input_data)
+
+
+def complete_tool_execution(
+    tool_id: str, success: bool, output: Optional[str] = None
+) -> None:
+    """Load activity tracking lazily to avoid AgentState's boot import cycle."""
+    from .activity_tracking import complete_tool_execution as track_completion
+
+    track_completion(tool_id, success, output)
+
 READ_ONLY_CONFIG = (
     Path(os.getenv("HOME", "/home/developer")) / ".trinity" / "read-only-config.json"
 )
 DEFAULT_TIMEOUT_SECONDS = 900
 MAX_PROTOCOL_LINE_BYTES = 8 * 1024 * 1024
-MAX_MANIFEST_BYTES = 64 * 1024
 MAX_PROTOCOL_MESSAGES = 10_000
 MAX_PROTOCOL_TRANSCRIPT_BYTES = 32 * 1024 * 1024
 MAX_STDERR_LINE_BYTES = 64 * 1024
 MAX_STDERR_BYTES = 1024 * 1024
 SUPPORTED_PROTOCOL_VERSION = 1
 _TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed"})
+_ACP_STOP_FAILURES = {
+    "max_tokens": (502, "ACP prompt stopped after reaching the token limit"),
+    "max_turn_requests": (422, "ACP prompt exceeded the agent request limit"),
+    "refusal": (422, "ACP agent refused the prompt"),
+}
 
 _AUTH_PATTERNS = (
     re.compile(r"\bunauthorized\b", re.IGNORECASE),
@@ -64,115 +87,6 @@ _AUTH_PATTERNS = (
     re.compile(r"\bauthentication\s+(?:failed|error)\b", re.IGNORECASE),
 )
 _RATE_MARKERS = ("429", "rate limit", "rate_limit", "quota", "too many requests")
-
-
-@dataclass(frozen=True)
-class ACPManifest:
-    command: Tuple[str, ...]
-    cwd: str = "/workspace"
-    permission_policy: str = "reject"
-    read_only_supported: bool = False
-
-
-def _validate_trusted_parent_chain(path: Path) -> None:
-    """Reject a trusted file whose pathname can be replaced by the agent user."""
-    current = path.parent
-    while True:
-        try:
-            info = os.stat(current, follow_symlinks=False)
-        except OSError as exc:
-            raise RuntimeError(
-                f"ACP trusted parent is unavailable: {current}: {exc}"
-            ) from exc
-        if not stat.S_ISDIR(info.st_mode):
-            raise RuntimeError(f"ACP trusted parent is not a directory: {current}")
-        if info.st_uid != 0 or info.st_mode & 0o022:
-            raise RuntimeError(
-                f"ACP trusted parent must be root-owned and not group/world writable: {current}"
-            )
-        if current.parent == current:
-            return
-        current = current.parent
-
-
-def _validate_trusted_stat(
-    path: Path, info: os.stat_result, *, executable: bool
-) -> None:
-    if not stat.S_ISREG(info.st_mode):
-        raise RuntimeError(f"ACP trusted file is not a regular file: {path}")
-    if info.st_uid != 0:
-        raise RuntimeError(f"ACP trusted file must be owned by root: {path}")
-    if info.st_mode & 0o022:
-        raise RuntimeError(f"ACP trusted file must not be group/world writable: {path}")
-    if executable and not info.st_mode & 0o111:
-        raise RuntimeError(f"ACP launcher is not executable: {path}")
-
-
-def _trusted_file(path: Path, *, executable: bool = False) -> os.stat_result:
-    """Open without following symlinks and enforce the derived-image trust boundary."""
-    _validate_trusted_parent_chain(path)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        raise RuntimeError(f"ACP trusted file is unavailable: {path}: {exc}") from exc
-    try:
-        info = os.fstat(fd)
-    finally:
-        os.close(fd)
-    _validate_trusted_stat(path, info, executable=executable)
-    return info
-
-
-def _load_manifest(path: Path = ACP_MANIFEST) -> ACPManifest:
-    _validate_trusted_parent_chain(path)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-        try:
-            _validate_trusted_stat(path, os.fstat(fd), executable=False)
-            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
-                text = stream.read(MAX_MANIFEST_BYTES + 1)
-        finally:
-            os.close(fd)
-        if len(text.encode("utf-8")) > MAX_MANIFEST_BYTES:
-            raise RuntimeError(
-                f"ACP runtime manifest exceeds {MAX_MANIFEST_BYTES} bytes"
-            )
-        raw = json.loads(text)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"invalid ACP runtime manifest {path}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise RuntimeError("ACP runtime manifest must be a JSON object")
-    if raw.get("version") != 1:
-        raise RuntimeError("ACP runtime manifest version must be 1")
-    command = raw.get("command")
-    if (
-        not isinstance(command, list)
-        or not command
-        or not all(isinstance(v, str) and v for v in command)
-    ):
-        raise RuntimeError(
-            "ACP runtime manifest command must be a non-empty string array"
-        )
-    launcher = Path(command[0])
-    if not launcher.is_absolute():
-        raise RuntimeError("ACP launcher path must be absolute")
-    _trusted_file(launcher, executable=True)
-    cwd = raw.get("cwd", "/workspace")
-    if not isinstance(cwd, str) or not Path(cwd).is_absolute():
-        raise RuntimeError("ACP runtime manifest cwd must be absolute")
-    policy = raw.get("permission_policy", "reject")
-    if policy not in {"allow", "reject"}:
-        raise RuntimeError("ACP permission_policy must be 'allow' or 'reject'")
-    read_only = raw.get("read_only") or {}
-    if not isinstance(read_only, dict) or not isinstance(
-        read_only.get("supported", False), bool
-    ):
-        raise RuntimeError("ACP read_only must contain a boolean supported field")
-    return ACPManifest(
-        tuple(command), cwd, policy, bool(read_only.get("supported", False))
-    )
 
 
 def _read_only_enabled() -> bool:
@@ -193,6 +107,37 @@ def _read_only_enabled() -> bool:
 
 def _iso_now() -> str:
     return datetime.now().isoformat()
+
+
+def _sanitize_protocol_value(value: Any) -> Any:
+    """Sanitize an acyclic JSON value without a depth-based leak fallback."""
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if not isinstance(value, (dict, list)):
+        return value
+
+    root: Any = {} if isinstance(value, dict) else []
+    stack: List[Tuple[Any, Any]] = [(value, root)]
+    while stack:
+        source, target = stack.pop()
+        items = source.items() if isinstance(source, dict) else enumerate(source)
+        for key, item in items:
+            clean_key = sanitize_text(key) if isinstance(key, str) else key
+            if isinstance(item, str):
+                clean_item: Any = sanitize_text(item)
+            elif isinstance(item, dict):
+                clean_item = {}
+                stack.append((item, clean_item))
+            elif isinstance(item, list):
+                clean_item = []
+                stack.append((item, clean_item))
+            else:
+                clean_item = item
+            if isinstance(target, dict):
+                target[clean_key] = clean_item
+            else:
+                target.append(clean_item)
+    return root
 
 
 def _surface_guardrails(kind: str) -> int:
@@ -257,6 +202,10 @@ class _PromptState:
     tool_names: Dict[str, str] = field(default_factory=dict)
     completed_tools: set[str] = field(default_factory=set)
     raw_message_bytes: int = 0
+    context_used: Optional[int] = None
+    context_size: Optional[int] = None
+    cumulative_cost_usd: Optional[float] = None
+    turn_cost_usd: Optional[float] = None
 
 
 class _ACPConnection:
@@ -275,8 +224,13 @@ class _ACPConnection:
         self.session_id: Optional[str] = None
         self._next_id = 1
         self._io_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._stderr_thread: Optional[threading.Thread] = None
         self._prompt_active = False
+        self._prompt_done = threading.Event()
+        self._prompt_done.set()
+        self._last_stop_reason: Optional[str] = None
+        self._last_cost_usd = 0.0
 
     def start(self) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -320,6 +274,7 @@ class _ACPConnection:
                     # would invite a conforming server to call an unavailable API.
                     "fs": {"readTextFile": False, "writeTextFile": False},
                     "terminal": False,
+                    "auth": {"terminal": False},
                 },
                 "clientInfo": {"name": "trinity", "version": "1"},
             },
@@ -381,6 +336,20 @@ class _ACPConnection:
                 raise RuntimeError(
                     f"ACP initialize authMethods[{index}].id must be a string"
                 )
+            if not isinstance(method.get("name"), str) or not method["name"]:
+                raise RuntimeError(
+                    f"ACP initialize authMethods[{index}].name must be a string"
+                )
+            method_type = method.get("type", "agent")
+            if method_type == "terminal":
+                raise RuntimeError(
+                    "ACP agent advertised terminal authentication although "
+                    "Trinity set clientCapabilities.auth.terminal=false"
+                )
+            if method_type != "agent":
+                raise RuntimeError(
+                    f"ACP initialize authMethods[{index}].type is unsupported"
+                )
         capabilities = result.get("agentCapabilities", {})
         if not isinstance(capabilities, dict):
             raise RuntimeError("ACP initialize agentCapabilities must be an object")
@@ -396,10 +365,13 @@ class _ACPConnection:
             or self.process.poll() is not None
         ):
             raise RuntimeError("ACP subprocess is not running")
-        self.process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-        self.process.stdin.flush()
+        with self._write_lock:
+            self.process.stdin.write(
+                json.dumps(message, separators=(",", ":")) + "\n"
+            )
+            self.process.stdin.flush()
 
-    def _read(self) -> Dict[str, Any]:
+    def _read(self) -> List[Dict[str, Any]]:
         if self.process is None or self.process.stdout is None:
             raise RuntimeError("ACP subprocess is not running")
         line = self.process.stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1)
@@ -409,12 +381,16 @@ class _ACPConnection:
         if len(line.encode("utf-8", "replace")) > MAX_PROTOCOL_LINE_BYTES:
             raise RuntimeError("ACP protocol line exceeded size limit")
         try:
-            message = json.loads(line)
+            payload = json.loads(line)
         except json.JSONDecodeError as exc:
             raise RuntimeError("ACP stdout contained non-JSON protocol data") from exc
-        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-            raise RuntimeError("ACP stdout contained an invalid JSON-RPC message")
-        return message
+        messages = payload if isinstance(payload, list) else [payload]
+        if not messages:
+            raise RuntimeError("ACP stdout contained an empty JSON-RPC batch")
+        for message in messages:
+            if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                raise RuntimeError("ACP stdout contained an invalid JSON-RPC message")
+        return messages
 
     def _request(self, method: str, params: Dict[str, Any], state: _PromptState) -> Any:
         request_id = self._next_id
@@ -423,26 +399,36 @@ class _ACPConnection:
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
         )
         while True:
-            message = self._read()
-            self._record_raw_message(message, state)
-            if message.get("id") == request_id and (
-                "result" in message or "error" in message
-            ):
-                if "error" in message:
+            response: Optional[Dict[str, Any]] = None
+            for message in self._read():
+                self._record_raw_message(message, state)
+                if message.get("id") == request_id and (
+                    "result" in message or "error" in message
+                ):
+                    response = message
+                    continue
+                if "method" in message and "id" in message:
+                    self._handle_server_request(message, state)
+                elif message.get("method") == "session/update":
+                    if method != "session/prompt":
+                        raise RuntimeError(
+                            f"ACP sent session/update while handling {method}"
+                        )
+                    self._handle_update(message.get("params") or {}, state)
+            # Process the whole JSON-RPC batch before returning so notifications
+            # adjacent to the response cannot be stranded for the next request.
+            if response is not None:
+                if "error" in response:
                     raise RuntimeError(
-                        f"ACP {method} failed: {sanitize_text(str(message['error']))}"
+                        f"ACP {method} failed: {sanitize_text(str(response['error']))}"
                     )
-                return message.get("result")
-            if "method" in message and "id" in message:
-                self._handle_server_request(message, state)
-            elif message.get("method") == "session/update":
-                self._handle_update(message.get("params") or {}, state)
+                return response.get("result")
 
     @staticmethod
     def _record_raw_message(message: Dict[str, Any], state: _PromptState) -> None:
         if len(state.raw_messages) >= MAX_PROTOCOL_MESSAGES:
             raise RuntimeError("ACP protocol transcript exceeded message limit")
-        clean = sanitize_dict(message)
+        clean = _sanitize_protocol_value(message)
         encoded_size = len(
             json.dumps(clean, ensure_ascii=False).encode("utf-8", "replace")
         )
@@ -507,7 +493,18 @@ class _ACPConnection:
             )
 
     def _handle_update(self, params: Dict[str, Any], state: _PromptState) -> None:
+        if not isinstance(params, dict):
+            raise RuntimeError("ACP session/update params must be an object")
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or session_id != self.session_id:
+            raise RuntimeError("ACP session/update used an unexpected sessionId")
         update = params.get("update") or {}
+        if not isinstance(update, dict):
+            raise RuntimeError("ACP session/update payload must be an object")
+        # This is the earliest boundary shared by persisted logs, live SSE, and
+        # activity tracking. Never let an agent-authored protocol field reach
+        # one of those sinks before sanitization.
+        update = _sanitize_protocol_value(update)
         kind = update.get("sessionUpdate") or update.get("type")
         if kind == "agent_message_chunk":
             content = update.get("content") or {}
@@ -516,11 +513,16 @@ class _ACPConnection:
                 state.text.append(text)
             return
         if kind == "tool_call":
-            tool_id = str(update.get("toolCallId") or update.get("id") or uuid.uuid4())
-            name = str(update.get("title") or update.get("kind") or "ACP tool")
+            tool_id = sanitize_text(
+                str(update.get("toolCallId") or update.get("id") or uuid.uuid4())
+            )
+            name = sanitize_text(
+                str(update.get("title") or update.get("kind") or "ACP tool")
+            )
             tool_input = update.get("rawInput") or {}
             if not isinstance(tool_input, dict):
                 tool_input = {"value": tool_input}
+            tool_input = _sanitize_protocol_value(tool_input)
             state.tool_names[tool_id] = name
             status_value = update.get("status")
             entry = ExecutionLogEntry(
@@ -540,15 +542,53 @@ class _ACPConnection:
                 self._complete_tool_update(tool_id, update, state)
             return
         if kind == "tool_call_update":
-            tool_id = str(update.get("toolCallId") or update.get("id") or "unknown")
+            tool_id = sanitize_text(
+                str(update.get("toolCallId") or update.get("id") or "unknown")
+            )
             status_value = update.get("status")
             title = update.get("title")
             if isinstance(title, str) and title:
-                state.tool_names[tool_id] = title
+                state.tool_names[tool_id] = sanitize_text(title)
             # ACP tool updates are partial. Pending, in-progress, and status-less
             # frames carry progress only; they must not close Trinity activity.
             if status_value in _TERMINAL_TOOL_STATUSES:
                 self._complete_tool_update(tool_id, update, state)
+            return
+        if kind == "usage_update":
+            used = update.get("used")
+            size = update.get("size")
+            if (
+                isinstance(used, bool)
+                or not isinstance(used, int)
+                or used < 0
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or size < 0
+            ):
+                raise RuntimeError(
+                    "ACP usage_update requires non-negative integer used and size"
+                )
+            state.context_used = used
+            state.context_size = size
+            cost = update.get("cost")
+            if cost is not None:
+                if not isinstance(cost, dict):
+                    raise RuntimeError("ACP usage_update cost must be an object")
+                amount = cost.get("amount")
+                currency = cost.get("currency")
+                if (
+                    isinstance(amount, bool)
+                    or not isinstance(amount, (int, float))
+                    or not math.isfinite(amount)
+                    or amount < 0
+                    or not isinstance(currency, str)
+                    or not currency
+                ):
+                    raise RuntimeError(
+                        "ACP usage_update cost requires non-negative amount and currency"
+                    )
+                if currency.upper() == "USD":
+                    state.cumulative_cost_usd = float(amount)
 
     def _complete_tool_update(
         self,
@@ -585,10 +625,57 @@ class _ACPConnection:
         except Exception:
             logger.debug("ACP tool activity completion failed", exc_info=True)
 
+    def _close_pending_tools(self, state: _PromptState, reason: str) -> None:
+        """Fail-close activities whose ACP terminal update never arrived."""
+        for tool_id in tuple(state.tool_names):
+            if tool_id in state.completed_tools:
+                continue
+            self._complete_tool_update(
+                tool_id,
+                {"status": "failed", "rawOutput": sanitize_text(reason)},
+                state,
+            )
+
+    def _update_turn_cost(self, state: _PromptState) -> None:
+        """Convert ACP's cumulative session cost to a per-turn delta."""
+        if state.cumulative_cost_usd is None:
+            return
+        cumulative = state.cumulative_cost_usd
+        if cumulative >= self._last_cost_usd:
+            state.turn_cost_usd = cumulative - self._last_cost_usd
+        else:
+            logger.warning(
+                "[ACP] cumulative session cost decreased from %s to %s; "
+                "treating the new value as a reset session total",
+                self._last_cost_usd,
+                cumulative,
+            )
+            state.turn_cost_usd = cumulative
+        # Advance the baseline even for a refused/cancelled/failed prompt so its
+        # spend cannot be misattributed to a later successful turn.
+        self._last_cost_usd = cumulative
+
+    @staticmethod
+    def _validate_stop_reason(result: Any) -> str:
+        if not isinstance(result, dict):
+            raise RuntimeError("ACP session/prompt response must be an object")
+        stop_reason = result.get("stopReason")
+        if not isinstance(stop_reason, str) or not stop_reason:
+            raise RuntimeError("ACP session/prompt response is missing stopReason")
+        if stop_reason not in {"end_turn", "cancelled", *_ACP_STOP_FAILURES}:
+            raise RuntimeError(
+                f"ACP session/prompt returned unknown stopReason {stop_reason!r}"
+            )
+        return stop_reason
+
     def prompt(self, prompt: str) -> Tuple[str, _PromptState]:
         with self._io_lock:
             self.start()
             state = _PromptState()
+            result: Any = None
+            pending_reason = "ACP prompt ended before the tool reported completion"
+            self._last_stop_reason = None
+            self._prompt_done.clear()
             self._prompt_active = True
             try:
                 result = self._request(
@@ -599,16 +686,22 @@ class _ACPConnection:
                     },
                     state,
                 )
-            finally:
-                self._prompt_active = False
-            if isinstance(result, dict):
-                stop_reason = result.get("stopReason")
+                stop_reason = self._validate_stop_reason(result)
+                self._last_stop_reason = stop_reason
                 if stop_reason == "cancelled":
+                    pending_reason = "ACP prompt was cancelled before the tool completed"
                     raise HTTPException(
                         status_code=499, detail="ACP prompt was cancelled"
                     )
-                if stop_reason not in {None, "end_turn"}:
-                    logger.warning("[ACP] prompt stopped with reason %r", stop_reason)
+                failure = _ACP_STOP_FAILURES.get(stop_reason)
+                if failure:
+                    pending_reason = f"ACP prompt stopped with {stop_reason}"
+                    raise HTTPException(status_code=failure[0], detail=failure[1])
+            finally:
+                self._close_pending_tools(state, pending_reason)
+                self._update_turn_cost(state)
+                self._prompt_active = False
+                self._prompt_done.set()
             response = "".join(state.text)
             if not response and isinstance(result, dict):
                 candidate = result.get("text") or result.get("message")
@@ -616,14 +709,14 @@ class _ACPConnection:
                     response = candidate
             return sanitize_text(response), state
 
-    def cancel_prompt(self) -> None:
+    def cancel_prompt(self, wait_timeout: float = 0.0) -> bool:
         if (
             not self._prompt_active
             or not self.session_id
             or self.process is None
             or self.process.poll() is not None
         ):
-            return
+            return False
         try:
             self._write(
                 {
@@ -634,6 +727,11 @@ class _ACPConnection:
             )
         except Exception:
             logger.debug("ACP session/cancel notification failed", exc_info=True)
+            return False
+        if wait_timeout <= 0:
+            return False
+        self._prompt_done.wait(wait_timeout)
+        return self._prompt_done.is_set() and self._last_stop_reason == "cancelled"
 
     def close(self) -> None:
         process = self.process
@@ -657,6 +755,8 @@ class ACPRuntime(AgentRuntime):
         self.manifest_path = manifest_path
         self._chat: Optional[_ACPConnection] = None
         self._chat_lock = threading.Lock()
+        self._active: Dict[str, _ACPConnection] = {}
+        self._active_lock = threading.Lock()
 
     @classmethod
     def capabilities(cls) -> RuntimeCapabilities:
@@ -693,6 +793,46 @@ class ACPRuntime(AgentRuntime):
         if connection:
             connection.close()
 
+    def _track_active(
+        self, execution_id: Optional[str], connection: _ACPConnection
+    ) -> None:
+        if execution_id:
+            with self._active_lock:
+                self._active[execution_id] = connection
+
+    def _untrack_active(
+        self, execution_id: Optional[str], connection: _ACPConnection
+    ) -> None:
+        if execution_id:
+            with self._active_lock:
+                if self._active.get(execution_id) is connection:
+                    del self._active[execution_id]
+
+    def cancel_execution(
+        self, execution_id: str, timeout_seconds: float = 2.0
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            with self._active_lock:
+                connection = self._active.get(execution_id)
+            if connection is None:
+                return False
+            if connection._prompt_active:
+                break
+            process = connection.process
+            if process is None or process.poll() is not None:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+        confirmed = connection.cancel_prompt(
+            wait_timeout=max(0.0, deadline - time.monotonic())
+        )
+        if confirmed:
+            get_process_registry().mark_terminated(execution_id)
+        return confirmed
+
     @staticmethod
     def _combined_prompt(prompt: str, system_prompt: Optional[str]) -> str:
         if system_prompt:
@@ -707,19 +847,25 @@ class ACPRuntime(AgentRuntime):
         session_id: Optional[str],
         tool_count: int,
         model: Optional[str],
+        state: _PromptState,
     ) -> ExecutionMetadata:
         return ExecutionMetadata(
-            cost_usd=None,
+            cost_usd=state.turn_cost_usd,
             duration_ms=int((time.monotonic() - started) * 1000),
             tool_count=tool_count,
             session_id=session_id,
             execution_id=execution_id,
             status="success",
             model_name=model,
-            # Generic ACP currently receives no portable token/context
-            # telemetry. Zero means unknown and avoids presenting the model
-            # class's legacy 200K default as measured provider truth.
-            context_window=0,
+            input_tokens=state.context_used or 0,
+            # ACP usage_update is authoritative when present. Otherwise use
+            # Trinity's conservative model catalog fallback, just like the
+            # other runtimes, rather than encoding "unknown" as a misleading 0.
+            context_window=(
+                state.context_size
+                if state.context_size is not None and state.context_size > 0
+                else resolve_context_window(model)
+            ),
         )
 
     async def execute(
@@ -762,6 +908,7 @@ class ACPRuntime(AgentRuntime):
                         "pgid": os.getpgid(connection.process.pid),
                     },
                 )
+            self._track_active(execution_id, connection)
             response, state = await asyncio.wait_for(
                 asyncio.to_thread(
                     connection.prompt, self._combined_prompt(prompt, system_prompt)
@@ -776,6 +923,7 @@ class ACPRuntime(AgentRuntime):
                     1 for item in state.execution_log if item.type == "tool_use"
                 ),
                 model=effective_model,
+                state=state,
             )
             return response, state.execution_log, metadata, state.raw_messages
         except asyncio.TimeoutError as exc:
@@ -801,6 +949,7 @@ class ACPRuntime(AgentRuntime):
                     self._chat = None
             raise _map_acp_exception(exc) from exc
         finally:
+            self._untrack_active(execution_id, connection)
             if execution_id:
                 registry.unregister(execution_id)
 
@@ -858,6 +1007,7 @@ class ACPRuntime(AgentRuntime):
                         "pgid": os.getpgid(connection.process.pid),
                     },
                 )
+            self._track_active(execution_id, connection)
             response, state = await asyncio.wait_for(
                 asyncio.to_thread(
                     connection.prompt, self._combined_prompt(prompt, system_prompt)
@@ -873,6 +1023,7 @@ class ACPRuntime(AgentRuntime):
                     1 for item in state.execution_log if item.type == "tool_use"
                 ),
                 model=effective_model,
+                state=state,
             )
             return response, state.execution_log, metadata, session_id
         except asyncio.TimeoutError as exc:
@@ -884,6 +1035,7 @@ class ACPRuntime(AgentRuntime):
         except Exception as exc:
             raise _map_acp_exception(exc) from exc
         finally:
+            self._untrack_active(execution_id, connection)
             if execution_id:
                 registry.unregister(execution_id)
             connection.close()

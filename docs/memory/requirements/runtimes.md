@@ -372,31 +372,46 @@ Composition paths and whether the model is known:
   root-owned, non-writable files reached through root-owned, non-writable parent
   directories. Manifest parsing is bounded and reads the validated descriptor.
 - **ACP-003 — Protocol purity:** stdout carries newline-delimited ACP JSON-RPC
-  only; malformed, oversized, or prematurely closed transport fails explicitly.
+  only; single messages and JSON-RPC batches are accepted, while malformed,
+  oversized, empty-batch, or prematurely closed transport fails explicitly.
 - **ACP-004 — Lifecycle:** Chat supports in-process continuity and reset;
-  headless executions are process/session isolated and registered for process-
-  group cancellation and bounded cleanup.
+  headless executions are process/session isolated. Operator termination sends
+  ACP `session/cancel`, waits briefly for `stopReason=cancelled`, and only then
+  falls back to registered process-group cancellation and bounded cleanup.
 - **ACP-005 — Conservative capability contract:** MCP, persisted Session-tab
-  resume, image input, portable `allowed_tools`/`max_turns`, and cost reporting
-  remain unavailable until implemented without widening caller restrictions.
+  resume, image input, portable `allowed_tools`/`max_turns`, and guaranteed cost
+  reporting remain unavailable until implemented without widening caller
+  restrictions. When an agent emits ACP v1 `usage_update`, Trinity consumes its
+  context usage/window and optional cumulative USD cost without claiming every
+  ACP harness provides that telemetry.
 - **ACP-006 — Security parity:** credentials use the per-spawn environment and
-  sanitizer; model selection propagates per process; read-only fails closed;
-  common wall-clock guardrails apply and unmappable controls are surfaced.
-- **ACP-007 — Error contract:** rate/auth/timeout/transport/unsupported failures
-  map to 429/503/504/502/422 respectively; unknown failures remain 500.
+  every protocol-derived response, transcript, live SSE entry, tool title/input,
+  output, and activity field is sanitized before publication or storage. Model
+  selection propagates per process; read-only fails closed; common wall-clock
+  guardrails apply and unmappable controls are surfaced.
+- **ACP-007 — Error contract:** only `stopReason=end_turn` is success.
+  `cancelled`, `max_tokens`, `max_turn_requests`, and `refusal` become explicit
+  non-success terminals; a missing or unknown stop reason is a protocol failure.
+  Rate/auth/timeout/transport/unsupported failures map to 429/503/504/502/422
+  respectively; unknown failures remain 500.
 - **ACP-008 — Deployability:** acceptance images use allowed
   `trinity-agent-base:*` tags, templates select the required derived image, and
-  pull-request CI builds/verifies them without secrets. Provider-backed tests are
-  an explicit manual workflow using repository Actions secrets.
+  pull-request CI builds/verifies them without secrets. Provider-backed tests run
+  manually from a default-branch workflow or on an explicitly enabled trusted
+  fork branch, so an exact proposal-head result can be attached during review.
 - **ACP-009 — Honest negotiation:** Trinity accepts only ACP protocol v1 and
   environment-authenticated sessions. It rejects version mismatches and malformed
-  authentication/capability metadata; advertised login choices remain compatible
-  with an already-injected key, while a session that actually requires interactive
-  login fails explicitly. Reverse filesystem/terminal methods remain unsupported
-  until their request handlers exist.
+  authentication/capability metadata, including auth methods without both `id`
+  and `name`. Trinity advertises `auth.terminal=false` and rejects terminal auth
+  methods; advertised agent-handled login choices remain compatible with an
+  already-injected key, while a session that actually requires interactive login
+  fails explicitly. Reverse filesystem/terminal methods remain unsupported until
+  their request handlers exist.
 - **ACP-010 — Bounded, terminal lifecycle:** pending, in-progress, and status-less
   tool updates never complete an activity; only terminal status does, at most
-  once. The aggregate protocol transcript and stderr logging are bounded, and
+  once during the normal stream. Prompt completion, refusal, cancellation, and
+  error cleanup fail-close any still-pending activity so the timeline cannot stay
+  running. The aggregate protocol transcript and stderr logging are bounded, and
   any framing/request failure discards the retained connection before recovery.
 
 ---

@@ -188,8 +188,8 @@ async def _cancellation(harness: str) -> None:
             break
         await asyncio.sleep(0.05)
     _require(registry.get_status(execution_id) is not None, "execution finished before cancellation registration")
-    termination = await asyncio.to_thread(registry.terminate, execution_id, 1)
-    _require(termination.get("success") is True, f"cancellation failed: {termination.get('reason')}")
+    confirmed = await asyncio.to_thread(runtime.cancel_execution, execution_id, 5.0)
+    _require(confirmed, "ACP session/cancel was not acknowledged with stopReason=cancelled")
     try:
         await task
     except BaseException:
@@ -197,7 +197,7 @@ async def _cancellation(harness: str) -> None:
     else:
         raise AssertionError("cancelled ACP execution completed successfully")
     _require(registry.was_terminated(execution_id), "cancellation marker was not retained")
-    print(f"{harness}: process-group cancellation passed", flush=True)
+    print(f"{harness}: ACP protocol cancellation passed", flush=True)
 
 
 async def _run(harness: str) -> None:

@@ -188,6 +188,17 @@ class AgentRuntime(ABC):
         """
         return None
 
+    def cancel_execution(
+        self, execution_id: str, timeout_seconds: float = 2.0
+    ) -> bool:
+        """Ask a protocol runtime to cancel one active execution gracefully.
+
+        CLI runtimes inherit ``False`` and continue through the process-registry
+        signal path. Protocol runtimes may override this hook when their wire
+        contract has a cancellation acknowledgement.
+        """
+        return False
+
 
 # Accepted AGENT_RUNTIME values (lowercased). Unknown values fail loudly
 # rather than silently selecting Claude (#1187 Phase D).

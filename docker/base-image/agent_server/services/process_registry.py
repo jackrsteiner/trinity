@@ -251,6 +251,18 @@ class ProcessRegistry:
             logger.error(f"[ProcessRegistry] Error terminating {execution_id}: {e}")
             return {"success": False, "reason": "error", "error": str(e)}
 
+    def mark_terminated(self, execution_id: str) -> None:
+        """Record a user cancellation confirmed outside the signal path.
+
+        Protocol runtimes acknowledge cancellation on their own wire before
+        their execution coroutine unwinds. They still need the same short-lived
+        marker used by signal termination so result persistence labels the turn
+        as cancelled rather than failed.
+        """
+        with self._lock:
+            if execution_id in self._processes:
+                self._terminated[execution_id] = time.time()
+
     def get_status(self, execution_id: str) -> Optional[dict]:
         """
         Get status of a registered process.

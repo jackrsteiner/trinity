@@ -28,6 +28,7 @@ FAKE_SERVER = r"""#!/usr/bin/env python3
 import json
 import os
 import sys
+import time
 import uuid
 
 memory = ""
@@ -81,9 +82,52 @@ for line in sys.stdin:
                 "sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":"duplicate"
             }}})
             answer = "tool-ok"
+        elif text == "secret-tool":
+            secret = "sk-livecredential012345678901234"
+            send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{
+                "sessionUpdate":"tool_call","toolCallId":"secret-tool","title":"run " + secret,
+                "status":"pending","rawInput":{"command":"TOKEN=" + secret}
+            }}})
+            time.sleep(0.1)
+            send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"secret-tool","status":"completed",
+                "rawOutput":"Bearer " + secret
+            }}})
+            answer = "secret-tool-ok"
+        elif text == "dangling-tool":
+            send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{
+                "sessionUpdate":"tool_call","toolCallId":"dangling","title":"sleep","status":"in_progress","rawInput":{}
+            }}})
+            answer = "dangling-tool-finished"
+        elif text == "usage-1" or text == "usage-2":
+            amount = 1.25 if text == "usage-1" else 2.0
+            used = 1200 if text == "usage-1" else 1800
+            send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{
+                "sessionUpdate":"usage_update","used":used,"size":32768,
+                "cost":{"amount":amount,"currency":"USD"}
+            }}})
+            answer = text
+        elif text == "batch":
+            print(json.dumps([
+                {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{
+                    "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"batch-ok"}
+                }}},
+                {"jsonrpc":"2.0","id":rid,"result":{"stopReason":"end_turn"}}
+            ], separators=(",", ":")), flush=True)
+            continue
         elif text == "capabilities":
             answer = json.dumps(initialize_params["clientCapabilities"], sort_keys=True)
-        elif text == "cancelled":
+        elif text in {"cancelled", "max_tokens", "max_turn_requests", "refusal", "unknown-stop"}:
+            reason = "future_reason" if text == "unknown-stop" else text
+            send({"jsonrpc":"2.0","id":rid,"result":{"stopReason":reason}})
+            continue
+        elif text == "missing-stop":
+            send({"jsonrpc":"2.0","id":rid,"result":{}})
+            continue
+        elif text == "wait-for-cancel":
+            cancellation = json.loads(sys.stdin.readline())
+            if cancellation.get("method") != "session/cancel":
+                raise RuntimeError("expected session/cancel")
             send({"jsonrpc":"2.0","id":rid,"result":{"stopReason":"cancelled"}})
             continue
         elif text == "bad-json":
@@ -108,7 +152,8 @@ def fake_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(acp_runtime, "_read_only_enabled", lambda: False)
     # The fixture is intentionally in pytest's user-owned temporary directory;
     # individual manifest tests exercise the production trust checks directly.
-    monkeypatch.setattr(acp_runtime, "_trusted_file", lambda *_a, **_kw: None)
+    manifest_module = importlib.import_module("agent_server.acp_manifest")
+    monkeypatch.setattr(manifest_module, "trusted_file", lambda *_a, **_kw: None)
 
     def make(policy="reject"):
         return ACPManifest((sys.executable, str(launcher)), str(tmp_path), policy, True)
@@ -132,6 +177,19 @@ def test_runtime_declares_conservative_common_denominator():
         ({"protocolVersion": 1, "authMethods": {}}, "must be an array"),
         ({"protocolVersion": 1, "authMethods": ["login"]}, "must be an object"),
         ({"protocolVersion": 1, "authMethods": [{}]}, "id must be a string"),
+        (
+            {"protocolVersion": 1, "authMethods": [{"id": "login"}]},
+            "name must be a string",
+        ),
+        (
+            {
+                "protocolVersion": 1,
+                "authMethods": [
+                    {"id": "login", "name": "Terminal login", "type": "terminal"}
+                ],
+            },
+            "terminal authentication",
+        ),
         ({"protocolVersion": 1, "agentCapabilities": []}, "must be an object"),
     ],
 )
@@ -154,8 +212,13 @@ def test_manifest_rejects_untrusted_owner(tmp_path, monkeypatch):
     manifest.write_text('{"version":1,"command":["/bin/false"]}')
     if os.getuid() == 0:
         pytest.skip("test requires an unprivileged test runner")
-    monkeypatch.setattr(
-        acp_runtime, "_validate_trusted_parent_chain", lambda _path: None
+    # Older tests reload the agent_server subtree during the full suite. Patch
+    # the exact loader function's module globals rather than whichever module
+    # object currently occupies sys.modules.
+    monkeypatch.setitem(
+        acp_runtime._load_manifest.__globals__,
+        "_validate_trusted_parent_chain",
+        lambda _path: None,
     )
     with pytest.raises(RuntimeError, match="owned by root"):
         acp_runtime._load_manifest(manifest)
@@ -251,7 +314,7 @@ def test_model_is_propagated_to_harness_and_metadata(fake_manifest, monkeypatch)
         )
         assert response == "provider-model-42"
         assert metadata.model_name == "provider-model-42"
-        assert metadata.context_window == 0
+        assert metadata.context_window == 200000
 
     asyncio.run(scenario())
 
@@ -267,6 +330,7 @@ def test_initialize_does_not_advertise_unimplemented_filesystem_rpc(
         capabilities = json.loads(response)
         assert capabilities["fs"] == {"readTextFile": False, "writeTextFile": False}
         assert capabilities["terminal"] is False
+        assert capabilities["auth"] == {"terminal": False}
 
     asyncio.run(scenario())
 
@@ -281,6 +345,175 @@ def test_cancelled_stop_reason_is_not_reported_as_success(fake_manifest, monkeyp
         assert cancelled.value.status_code == 499
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "prompt,status,detail",
+    [
+        ("max_tokens", 502, "token limit"),
+        ("max_turn_requests", 422, "agent request limit"),
+        ("refusal", 422, "refused"),
+        ("missing-stop", 500, "missing stopReason"),
+        ("unknown-stop", 500, "unknown stopReason"),
+    ],
+)
+def test_every_non_success_or_invalid_stop_reason_fails(
+    fake_manifest, monkeypatch, prompt, status, detail
+):
+    runtime = ACPRuntime()
+    monkeypatch.setattr(runtime, "_manifest", lambda: fake_manifest())
+
+    async def scenario():
+        with pytest.raises(HTTPException) as stopped:
+            await runtime.execute_headless(prompt)
+        assert stopped.value.status_code == status
+        assert detail in str(stopped.value.detail)
+
+    asyncio.run(scenario())
+
+
+def test_json_rpc_batch_processes_notifications_before_return(fake_manifest, monkeypatch):
+    runtime = ACPRuntime()
+    monkeypatch.setattr(runtime, "_manifest", lambda: fake_manifest())
+
+    async def scenario():
+        response, *_rest = await runtime.execute_headless("batch")
+        assert response == "batch-ok"
+
+    asyncio.run(scenario())
+
+
+def test_usage_update_populates_context_and_turn_cost(fake_manifest, monkeypatch):
+    runtime = ACPRuntime()
+    monkeypatch.setattr(runtime, "_manifest", lambda: fake_manifest())
+
+    async def scenario():
+        first = await runtime.execute("usage-1", continue_session=True)
+        second = await runtime.execute("usage-2", continue_session=True)
+        assert first[2].input_tokens == 1200
+        assert first[2].context_window == 32768
+        assert first[2].cost_usd == 1.25
+        assert second[2].input_tokens == 1800
+        assert second[2].context_window == 32768
+        assert second[2].cost_usd == 0.75
+        runtime.reset_session()
+
+    asyncio.run(scenario())
+
+
+def test_live_tool_stream_and_activity_are_sanitized(fake_manifest, monkeypatch):
+    runtime = ACPRuntime()
+    monkeypatch.setattr(runtime, "_manifest", lambda: fake_manifest())
+    activity_starts = []
+    activity_completions = []
+    monkeypatch.setattr(
+        acp_runtime,
+        "start_tool_execution",
+        lambda tool_id, name, value: activity_starts.append((tool_id, name, value)),
+    )
+    monkeypatch.setattr(
+        acp_runtime,
+        "complete_tool_execution",
+        lambda tool_id, success, output: activity_completions.append(
+            (tool_id, success, output)
+        ),
+    )
+    registry = acp_runtime.get_process_registry()
+
+    async def scenario():
+        task = asyncio.create_task(
+            runtime.execute_headless("secret-tool", execution_id="live-secret")
+        )
+        for _ in range(200):
+            queue = registry.subscribe_logs("live-secret")
+            if queue is not None:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("live stream was not registered")
+        streamed = []
+        while len(streamed) < 2:
+            entry = await asyncio.wait_for(queue.get(), timeout=2)
+            if entry.get("type") != "stream_end":
+                streamed.append(entry)
+        await task
+        rendered = json.dumps(
+            {"streamed": streamed, "starts": activity_starts, "ends": activity_completions}
+        )
+        assert "sk-livecredential" not in rendered
+        assert "***REDACTED***" in rendered
+        registry.unsubscribe_logs("live-secret", queue)
+
+    asyncio.run(scenario())
+
+
+def test_prompt_cleanup_closes_pending_tool_activity(fake_manifest, monkeypatch):
+    runtime = ACPRuntime()
+    monkeypatch.setattr(runtime, "_manifest", lambda: fake_manifest())
+    completions = []
+    monkeypatch.setattr(
+        acp_runtime,
+        "complete_tool_execution",
+        lambda tool_id, success, output: completions.append((tool_id, success, output)),
+    )
+
+    async def scenario():
+        response, log, *_rest = await runtime.execute_headless("dangling-tool")
+        assert response == "dangling-tool-finished"
+        assert [entry.type for entry in log] == ["tool_use", "tool_result"]
+        assert log[-1].success is False
+        assert completions == [
+            ("dangling", False, "ACP prompt ended before the tool reported completion")
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_runtime_cancel_waits_for_protocol_acknowledgement(fake_manifest, monkeypatch):
+    runtime = ACPRuntime()
+    monkeypatch.setattr(runtime, "_manifest", lambda: fake_manifest())
+    registry = acp_runtime.get_process_registry()
+
+    async def scenario():
+        task = asyncio.create_task(
+            runtime.execute_headless(
+                "wait-for-cancel", execution_id="protocol-cancel", timeout_seconds=30
+            )
+        )
+        for _ in range(200):
+            if registry.get_status("protocol-cancel") is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert registry.get_status("protocol-cancel") is not None
+        confirmed = await asyncio.to_thread(
+            runtime.cancel_execution, "protocol-cancel", 2.0
+        )
+        assert confirmed is True
+        with pytest.raises(HTTPException) as cancelled:
+            await task
+        assert cancelled.value.status_code == 499
+        assert registry.was_terminated("protocol-cancel") is True
+
+    asyncio.run(scenario())
+
+
+def test_terminate_endpoint_prefers_runtime_cancellation(monkeypatch):
+    runtime = SimpleNamespace(cancel_execution=lambda execution_id, timeout: True)
+    registry = SimpleNamespace(
+        terminate=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("signal fallback should not run")
+        )
+    )
+    monkeypatch.setattr(chat_router, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(chat_router, "get_process_registry", lambda: registry)
+
+    result = asyncio.run(chat_router.terminate_execution("protocol-execution"))
+
+    assert result == {
+        "status": "terminated",
+        "execution_id": "protocol-execution",
+        "method": "runtime",
+    }
 
 
 def test_protocol_error_discards_persistent_connection(fake_manifest, monkeypatch):
@@ -303,6 +536,45 @@ def test_protocol_transcript_has_aggregate_limit(monkeypatch):
     state = acp_runtime._PromptState()
     with pytest.raises(RuntimeError, match="transcript exceeded size"):
         acp_runtime._ACPConnection._record_raw_message({"value": "too large"}, state)
+
+
+def test_protocol_sanitizer_redacts_secrets_at_arbitrary_json_depth():
+    secret = "sk-deepcredential012345678901234"
+    value = {"secret-key-" + secret: secret}
+    for _ in range(80):
+        value = {"nested": [value]}
+
+    rendered = json.dumps(acp_runtime._sanitize_protocol_value(value))
+
+    assert secret not in rendered
+    assert "***REDACTED***" in rendered
+
+
+def test_usage_update_rejects_non_finite_cost_and_wrong_session():
+    connection = acp_runtime._ACPConnection(ACPManifest(("/bin/false",)))
+    connection.session_id = "expected"
+    state = acp_runtime._PromptState()
+    with pytest.raises(RuntimeError, match="unexpected sessionId"):
+        connection._handle_update(
+            {
+                "sessionId": "other",
+                "update": {"sessionUpdate": "usage_update", "used": 1, "size": 2},
+            },
+            state,
+        )
+    with pytest.raises(RuntimeError, match="non-negative amount"):
+        connection._handle_update(
+            {
+                "sessionId": "expected",
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "used": 1,
+                    "size": 2,
+                    "cost": {"amount": float("nan"), "currency": "USD"},
+                },
+            },
+            state,
+        )
 
 
 def test_active_prompt_sends_protocol_cancel_before_process_cleanup(monkeypatch):
@@ -340,20 +612,17 @@ def test_error_mapping_contract(message, status):
 
 
 def test_agent_health_checks_acp_manifest_instead_of_claude(monkeypatch):
-    sentinel = object()
-    fake = type("FakeRuntime", (), {"is_available": lambda self: sentinel})()
-    # Several legacy tests deliberately reload the agent_server subtree. Patch
-    # the live module identity used by state.py's local import, not the
-    # collection-time reference captured above.
-    live_acp_runtime = importlib.import_module("agent_server.services.acp_runtime")
-    monkeypatch.setattr(live_acp_runtime, "get_acp_runtime", lambda: fake)
-    state = state_module.AgentState.__new__(state_module.AgentState)
+    checks = []
+    live_state = importlib.import_module("agent_server.state")
+    monkeypatch.setattr(live_state, "load_acp_manifest", lambda: checks.append(True))
+    state = live_state.AgentState.__new__(live_state.AgentState)
     state.agent_runtime = "acp"
     state._check_claude_code = lambda: (_ for _ in ()).throw(
         AssertionError("Claude health fallback")
     )
 
-    assert state._check_runtime_available() is sentinel
+    assert state._check_runtime_available() is True
+    assert checks == [True]
 
 
 def test_model_routes_report_update_and_reset_acp(monkeypatch):

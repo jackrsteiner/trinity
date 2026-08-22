@@ -361,13 +361,26 @@ async def terminate_execution(execution_id: str):
     """
     Terminate a running execution by ID.
 
-    Sends SIGINT for graceful termination, then SIGKILL if needed.
-    This allows Claude Code to finish its current operation gracefully.
+    Gives the selected runtime a brief protocol-level cancellation window, then
+    falls back to SIGINT and SIGKILL for runtimes without an acknowledgement.
     """
     registry = get_process_registry()
+    runtime = get_runtime()
     # registry.terminate() does up to 7s of synchronous process.wait() (SIGINT grace + SIGKILL grace);
     # run in the default executor so the event loop stays responsive to concurrent /health probes.
     loop = asyncio.get_running_loop()
+    protocol_cancelled = await loop.run_in_executor(
+        None, runtime.cancel_execution, execution_id, 2.0
+    )
+    if protocol_cancelled:
+        logger.info(
+            f"[Terminate] Execution {execution_id} acknowledged protocol cancellation"
+        )
+        return {
+            "status": "terminated",
+            "execution_id": execution_id,
+            "method": "runtime",
+        }
     result = await loop.run_in_executor(None, registry.terminate, execution_id)
 
     if result["success"]:

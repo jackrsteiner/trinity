@@ -1,10 +1,13 @@
-"""Compatibility entrypoint for Hermes Agent 0.19.0's ACP tool lifecycle.
+"""Compatibility entrypoint for Hermes Agent 0.19.0's ACP integration.
 
 Hermes emits a reliable ``tool.completed`` progress callback immediately after
 each tool finishes, but its ACP adapter ignores that event and tries to rebuild
 completion notifications from the following agent-loop step. Some providers,
 including Gemini, can finish the turn without that reconstruction succeeding.
-Forward the direct callback and leave all other Hermes behavior untouched.
+Forward the direct callback. The pinned adapter also always advertises an
+interactive terminal setup auth method, even when environment credentials are
+active. This Trinity-only image removes that unusable method while retaining the
+agent-managed provider credential method.
 """
 from __future__ import annotations
 
@@ -119,8 +122,49 @@ def install_tool_completion_bridge() -> None:
     server.make_tool_progress_cb = make_tool_progress_cb
 
 
+def install_auth_capability_bridge() -> None:
+    """Remove terminal setup auth from this noninteractive Trinity image."""
+    from acp_adapter import server
+
+    original_builder = server.build_auth_methods
+
+    def build_auth_methods() -> list[Any]:
+        return [
+            method
+            for method in original_builder()
+            if getattr(method, "type", None) != "terminal"
+        ]
+
+    # server.py imports the builder into its own module namespace. Filtering at
+    # that seam preserves Hermes' provider detection and authentication logic;
+    # it only prevents advertising a flow this client explicitly cannot run.
+    server.build_auth_methods = build_auth_methods
+
+
+def install_cancel_response_bridge() -> None:
+    """Normalize Hermes' null interrupted response before its ACP adapter reads it."""
+    from run_agent import AIAgent
+
+    original_run = AIAgent.run_conversation
+
+    def run_conversation(*args: Any, **kwargs: Any) -> Any:
+        result = original_run(*args, **kwargs)
+        if isinstance(result, dict) and result.get("final_response") is None:
+            result = dict(result)
+            result["final_response"] = ""
+        return result
+
+    # Hermes 0.19.0's ACP prompt path calls .startswith() on final_response
+    # before emitting its cancelled stop reason. The underlying agent returns
+    # None for a successful interrupt; normalizing only that value lets Hermes'
+    # own cancelled/event logic finish without changing any non-cancel result.
+    AIAgent.run_conversation = run_conversation
+
+
 def main() -> None:
     configure_provider()
+    install_auth_capability_bridge()
+    install_cancel_response_bridge()
     install_tool_completion_bridge()
     from acp_adapter.entry import main as hermes_main
 

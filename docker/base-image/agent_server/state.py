@@ -8,6 +8,7 @@ import threading
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
 
+from .acp_manifest import load_acp_manifest
 from .models import ChatMessage
 from .model_context import resolve_context_window
 
@@ -116,9 +117,8 @@ class AgentState:
         """Check if the configured runtime CLI is available"""
         if self.agent_runtime.lower() == "acp":
             try:
-                from .services.acp_runtime import get_acp_runtime
-
-                return get_acp_runtime().is_available()
+                load_acp_manifest()
+                return True
             except Exception as e:
                 logger.error(f"ACP runtime check failed: {e}")
                 return False
