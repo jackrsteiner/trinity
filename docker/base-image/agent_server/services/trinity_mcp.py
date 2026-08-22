@@ -32,6 +32,11 @@ def inject_trinity_mcp_if_configured() -> bool:
 
     runtime = os.getenv("AGENT_RUNTIME", "claude-code").lower()
 
+    if runtime == "acp":
+        logger.info(
+            "Generic ACP declares mcp_support=false; skipping Trinity MCP injection"
+        )
+        return False
     if runtime == "codex":
         return _inject_codex_mcp(trinity_mcp_url, trinity_mcp_api_key)
     if runtime == "gemini-cli":
@@ -146,6 +151,11 @@ def configure_mcp_servers(mcp_servers: dict) -> bool:
 
     runtime = os.getenv("AGENT_RUNTIME", "claude-code").lower()
 
+    if runtime == "acp":
+        logger.warning(
+            "Generic ACP cannot configure template MCP servers; refusing Claude fallback"
+        )
+        return False
     if runtime == "codex":
         return _configure_codex_mcp_servers(mcp_servers)
     if runtime == "gemini-cli":

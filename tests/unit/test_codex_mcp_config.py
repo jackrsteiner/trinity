@@ -220,6 +220,25 @@ def test_configure_mcp_servers_empty_is_noop_true(monkeypatch):
     assert trinity_mcp.configure_mcp_servers({}) is True
 
 
+def test_acp_never_falls_through_to_claude_mcp(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME", "acp")
+    monkeypatch.setenv("TRINITY_MCP_URL", "https://trinity.invalid/mcp")
+    monkeypatch.setenv("TRINITY_MCP_API_KEY", "secret")
+    monkeypatch.setattr(
+        trinity_mcp,
+        "_inject_claude_mcp",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("Claude fallback")),
+    )
+    monkeypatch.setattr(
+        trinity_mcp,
+        "_configure_claude_mcp_servers",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("Claude fallback")),
+    )
+
+    assert trinity_mcp.inject_trinity_mcp_if_configured() is False
+    assert trinity_mcp.configure_mcp_servers({"server": {"command": "npx"}}) is False
+
+
 def test_configure_codex_skips_server_without_command(tmp_path, monkeypatch, caplog):
     """A template server with no command is skipped with a warning; when it is
     the only server, nothing is written and the call reports False (no servers

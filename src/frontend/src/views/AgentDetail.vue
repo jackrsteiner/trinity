@@ -760,6 +760,9 @@ const defaultModel = computed(() => {
   if (runtime === 'codex') {
     return 'gpt-5.1-codex' // OpenAI Codex default (#1187)
   }
+  if (runtime === 'acp') {
+    return 'acp-provider-default'
+  }
   return 'sonnet' // Claude default
 })
 

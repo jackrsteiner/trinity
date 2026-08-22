@@ -250,6 +250,15 @@ async def get_model():
     """Get the current model being used"""
     runtime = agent_state.agent_runtime
 
+    if runtime == "acp":
+        active_runtime = get_runtime()
+        model = agent_state.current_model or active_runtime.get_default_model()
+        return {
+            "model": model,
+            "runtime": runtime,
+            "available_models": [model] if model else [],
+            "note": "The derived ACP harness image controls the provider catalog.",
+        }
     if runtime == "gemini-cli" or runtime == "gemini":
         return {
             "model": agent_state.current_model,
@@ -274,6 +283,23 @@ async def set_model(request: ModelRequest):
     runtime = agent_state.agent_runtime
 
     # Validate based on runtime
+    if runtime == "acp":
+        model = request.model.strip()
+        if not model or len(model) > 200 or any(ch.isspace() for ch in model):
+            raise HTTPException(
+                status_code=400,
+                detail="ACP model must be a non-empty provider model id without whitespace.",
+            )
+        agent_state.current_model = model
+        # ACP model selection is passed to the harness process at startup, so a
+        # model change deliberately starts a fresh protocol session.
+        get_runtime().reset_session()
+        logger.info("ACP model changed to: %s", model)
+        return {
+            "status": "success",
+            "model": model,
+            "note": "ACP session reset; the model applies to the next turn.",
+        }
     if runtime == "gemini-cli" or runtime == "gemini":
         valid_models = ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
         if request.model in valid_models or request.model.startswith("gemini-"):

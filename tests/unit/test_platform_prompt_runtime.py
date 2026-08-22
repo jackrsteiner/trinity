@@ -79,6 +79,16 @@ def test_unknown_and_gemini_runtimes_keep_claude_naming():
         assert "mcp__trinity__list_agents" in prompt
 
 
+def test_acp_prompt_does_not_advertise_unavailable_mcp_tools():
+    prompt = get_platform_system_prompt("acp")
+    assert "mcp_support=false" not in prompt
+    assert "MCP tools are not connected" in prompt
+    assert "mcp__trinity__" not in prompt
+    assert "chat_with_agent" not in prompt
+    assert "share_file" not in prompt
+    assert "write_user_memory" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # compose_system_prompt threads runtime through
 # ---------------------------------------------------------------------------

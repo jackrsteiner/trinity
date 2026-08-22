@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import os
-import signal
+import re
 import stat
 import subprocess
 import threading
@@ -22,13 +22,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from fastapi import HTTPException
+
 from ..models import ExecutionLogEntry, ExecutionMetadata
 from ..utils.credential_sanitizer import sanitize_dict, sanitize_subprocess_line, sanitize_text
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
+from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .execution_env import build_execution_env
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
+from .subprocess_lifecycle import _capture_pgid, _drain_bounded
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,16 @@ ACP_MANIFEST = Path(os.getenv("TRINITY_ACP_MANIFEST", "/opt/trinity/acp/runtime.
 READ_ONLY_CONFIG = Path(os.getenv("HOME", "/home/developer")) / ".trinity" / "read-only-config.json"
 DEFAULT_TIMEOUT_SECONDS = 900
 MAX_PROTOCOL_LINE_BYTES = 8 * 1024 * 1024
+MAX_MANIFEST_BYTES = 64 * 1024
+
+_AUTH_PATTERNS = (
+    re.compile(r"\bunauthorized\b", re.IGNORECASE),
+    re.compile(r"\b401\s+unauthorized\b", re.IGNORECASE),
+    re.compile(r"\b(?:invalid|incorrect|missing|no)[ _]api[ _]key\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+authenticated\b", re.IGNORECASE),
+    re.compile(r"\bauthentication\s+(?:failed|error)\b", re.IGNORECASE),
+)
+_RATE_MARKERS = ("429", "rate limit", "rate_limit", "quota", "too many requests")
 
 
 @dataclass(frozen=True)
@@ -46,8 +60,39 @@ class ACPManifest:
     read_only_supported: bool = False
 
 
+def _validate_trusted_parent_chain(path: Path) -> None:
+    """Reject a trusted file whose pathname can be replaced by the agent user."""
+    current = path.parent
+    while True:
+        try:
+            info = os.stat(current, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError(f"ACP trusted parent is unavailable: {current}: {exc}") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(f"ACP trusted parent is not a directory: {current}")
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise RuntimeError(
+                f"ACP trusted parent must be root-owned and not group/world writable: {current}"
+            )
+        if current.parent == current:
+            return
+        current = current.parent
+
+
+def _validate_trusted_stat(path: Path, info: os.stat_result, *, executable: bool) -> None:
+    if not stat.S_ISREG(info.st_mode):
+        raise RuntimeError(f"ACP trusted file is not a regular file: {path}")
+    if info.st_uid != 0:
+        raise RuntimeError(f"ACP trusted file must be owned by root: {path}")
+    if info.st_mode & 0o022:
+        raise RuntimeError(f"ACP trusted file must not be group/world writable: {path}")
+    if executable and not info.st_mode & 0o111:
+        raise RuntimeError(f"ACP launcher is not executable: {path}")
+
+
 def _trusted_file(path: Path, *, executable: bool = False) -> os.stat_result:
     """Open without following symlinks and enforce the derived-image trust boundary."""
+    _validate_trusted_parent_chain(path)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -57,23 +102,28 @@ def _trusted_file(path: Path, *, executable: bool = False) -> os.stat_result:
         info = os.fstat(fd)
     finally:
         os.close(fd)
-    if not stat.S_ISREG(info.st_mode):
-        raise RuntimeError(f"ACP trusted file is not a regular file: {path}")
-    if info.st_uid != 0:
-        raise RuntimeError(f"ACP trusted file must be owned by root: {path}")
-    if info.st_mode & 0o022:
-        raise RuntimeError(f"ACP trusted file must not be group/world writable: {path}")
-    if executable and not info.st_mode & 0o111:
-        raise RuntimeError(f"ACP launcher is not executable: {path}")
+    _validate_trusted_stat(path, info, executable=executable)
     return info
 
 
 def _load_manifest(path: Path = ACP_MANIFEST) -> ACPManifest:
-    _trusted_file(path)
+    _validate_trusted_parent_chain(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        fd = os.open(path, flags)
+        try:
+            _validate_trusted_stat(path, os.fstat(fd), executable=False)
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
+                text = stream.read(MAX_MANIFEST_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(text.encode("utf-8")) > MAX_MANIFEST_BYTES:
+            raise RuntimeError(f"ACP runtime manifest exceeds {MAX_MANIFEST_BYTES} bytes")
+        raw = json.loads(text)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid ACP runtime manifest {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError("ACP runtime manifest must be a JSON object")
     if raw.get("version") != 1:
         raise RuntimeError("ACP runtime manifest version must be 1")
     command = raw.get("command")
@@ -100,14 +150,63 @@ def _read_only_enabled() -> bool:
         value = json.loads(READ_ONLY_CONFIG.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("ACP read-only config unavailable or malformed: %s", exc)
-        return False
-    return bool(value.get("enabled"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"ACP read-only config is unavailable or malformed; refusing execution: {exc}"
+        ) from exc
+    if not isinstance(value, dict) or not isinstance(value.get("enabled", False), bool):
+        raise RuntimeError(
+            "ACP read-only config must be a JSON object with a boolean enabled field"
+        )
+    return value.get("enabled", False)
 
 
 def _iso_now() -> str:
     return datetime.now().isoformat()
+
+
+def _surface_guardrails(kind: str) -> int:
+    """Enforce the common wall clock and make unmapped ACP controls visible."""
+    guardrails = _load_guardrails()
+    disallowed = guardrails.get("disallowed_tools") or []
+    if disallowed:
+        logger.warning(
+            "[ACP] guardrails disallow %s, but generic ACP has no portable per-tool "
+            "control; the restriction is surfaced and read-only remains enforced",
+            disallowed,
+        )
+    max_turns = guardrails.get("max_turns_chat" if kind == "chat" else "max_turns_task")
+    if max_turns:
+        logger.warning(
+            "[ACP] guardrail max_turns_%s=%s cannot be mapped portably; enforcing the "
+            "wall-clock timeout instead",
+            kind,
+            max_turns,
+        )
+    try:
+        timeout = int(guardrails.get("execution_timeout_sec") or _DEFAULT_EXECUTION_TIMEOUT_SEC)
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_EXECUTION_TIMEOUT_SEC
+    return max(1, timeout)
+
+
+def _map_acp_exception(exc: Exception) -> HTTPException:
+    """Map ACP/provider failures onto the status contract consumed by the backend."""
+    if isinstance(exc, HTTPException):
+        return exc
+    detail = sanitize_text(str(exc) or exc.__class__.__name__)[:500]
+    lower = detail.lower()
+    if any(marker in lower for marker in _RATE_MARKERS):
+        return HTTPException(status_code=429, detail=f"ACP provider rate limit: {detail}")
+    if any(pattern.search(detail) for pattern in _AUTH_PATTERNS):
+        return HTTPException(status_code=503, detail=f"ACP provider authentication failure: {detail}")
+    if "timed out" in lower:
+        return HTTPException(status_code=504, detail=detail)
+    if "closed stdout" in lower or "broken pipe" in lower or "connection reset" in lower:
+        return HTTPException(status_code=502, detail=detail)
+    if "cannot enforce" in lower or "does not support" in lower:
+        return HTTPException(status_code=422, detail=detail)
+    return HTTPException(status_code=500, detail=f"ACP execution failed: {detail}")
 
 
 @dataclass
@@ -119,9 +218,17 @@ class _PromptState:
 
 
 class _ACPConnection:
-    def __init__(self, manifest: ACPManifest, *, execution_id: Optional[str] = None):
+    def __init__(
+        self,
+        manifest: ACPManifest,
+        *,
+        execution_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
         self.manifest = manifest
         self.execution_id = execution_id
+        self.execution_tag: Optional[str] = None
+        self.model = model
         self.process: Optional[subprocess.Popen[str]] = None
         self.session_id: Optional[str] = None
         self._next_id = 1
@@ -134,7 +241,11 @@ class _ACPConnection:
         read_only = _read_only_enabled()
         if read_only and not self.manifest.read_only_supported:
             raise RuntimeError("ACP harness cannot enforce Trinity read-only mode; refusing execution")
-        extra = {EXECUTION_TAG_NAME: self.execution_id or f"acp-chat-{uuid.uuid4()}"}
+        execution_tag = self.execution_id or f"acp-chat-{uuid.uuid4()}"
+        self.execution_tag = execution_tag
+        extra = {EXECUTION_TAG_NAME: execution_tag}
+        if self.model:
+            extra["ACP_MODEL"] = self.model
         if read_only:
             extra["TRINITY_READ_ONLY"] = "1"
         env = build_execution_env(extra=extra)
@@ -325,22 +436,16 @@ class _ACPConnection:
         process = self.process
         self.process = None
         self.session_id = None
-        if process is None or process.poll() is not None:
+        if process is None:
             return
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGINT)
-            process.wait(timeout=2)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except OSError:
-                pass
-        for pipe in (process.stdin, process.stdout, process.stderr):
-            try:
-                if pipe:
-                    pipe.close()
-            except OSError:
-                pass
+        pgid = _capture_pgid(process)
+        _drain_bounded(
+            process,
+            self._stderr_thread,
+            grace=2,
+            pgid=pgid,
+            execution_tag=self.execution_tag,
+        )
 
 
 class ACPRuntime(AgentRuntime):
@@ -369,7 +474,11 @@ class ACPRuntime(AgentRuntime):
             return False
 
     def get_default_model(self) -> str:
-        return os.getenv("ACP_MODEL", "acp-provider-default")
+        return (
+            os.getenv("AGENT_RUNTIME_MODEL")
+            or os.getenv("ACP_MODEL")
+            or "acp-provider-default"
+        )
 
     def configure_mcp(self, mcp_servers: Dict) -> bool:
         return not bool(mcp_servers)
@@ -388,7 +497,12 @@ class ACPRuntime(AgentRuntime):
 
     @staticmethod
     def _metadata(
-        *, started: float, execution_id: Optional[str], session_id: Optional[str], tool_count: int
+        *,
+        started: float,
+        execution_id: Optional[str],
+        session_id: Optional[str],
+        tool_count: int,
+        model: Optional[str],
     ) -> ExecutionMetadata:
         return ExecutionMetadata(
             cost_usd=None,
@@ -397,7 +511,7 @@ class ACPRuntime(AgentRuntime):
             session_id=session_id,
             execution_id=execution_id,
             status="success",
-            model_name=os.getenv("ACP_MODEL") or None,
+            model_name=model,
         )
 
     async def execute(
@@ -409,16 +523,23 @@ class ACPRuntime(AgentRuntime):
         system_prompt: Optional[str] = None,
         execution_id: Optional[str] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
-        del model, stream
+        del stream
         started = time.monotonic()
+        effective_model = model or self.get_default_model()
         if not continue_session:
             self.reset_session()
         with self._chat_lock:
+            if self._chat is not None and self._chat.model != effective_model:
+                connection, self._chat = self._chat, None
+                connection.close()
             if self._chat is None:
-                self._chat = _ACPConnection(self._manifest(), execution_id=execution_id)
+                self._chat = _ACPConnection(
+                    self._manifest(), execution_id=execution_id, model=effective_model
+                )
             connection = self._chat
             connection.execution_id = execution_id
         registry = get_process_registry()
+        timeout_seconds = _surface_guardrails("chat")
         try:
             # Start before registration so the registry always gets a real handle.
             await asyncio.to_thread(connection.start)
@@ -431,13 +552,14 @@ class ACPRuntime(AgentRuntime):
                 )
             response, state = await asyncio.wait_for(
                 asyncio.to_thread(connection.prompt, self._combined_prompt(prompt, system_prompt)),
-                timeout=DEFAULT_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
             metadata = self._metadata(
                 started=started,
                 execution_id=execution_id,
                 session_id=connection.session_id,
                 tool_count=sum(1 for item in state.execution_log if item.type == "tool_use"),
+                model=effective_model,
             )
             return response, state.execution_log, metadata, state.raw_messages
         except asyncio.TimeoutError as exc:
@@ -445,13 +567,16 @@ class ACPRuntime(AgentRuntime):
             with self._chat_lock:
                 if self._chat is connection:
                     self._chat = None
-            raise RuntimeError("ACP execution timed out") from exc
-        except BaseException:
+            raise HTTPException(status_code=504, detail="ACP execution timed out") from exc
+        except asyncio.CancelledError:
+            connection.close()
+            raise
+        except Exception as exc:
             if connection.process is None or connection.process.poll() is not None:
                 with self._chat_lock:
                     if self._chat is connection:
                         self._chat = None
-            raise
+            raise _map_acp_exception(exc) from exc
         finally:
             if execution_id:
                 registry.unregister(execution_id)
@@ -469,18 +594,34 @@ class ACPRuntime(AgentRuntime):
         persist_session: bool = False,
         images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
-        del model
+        effective_model = model or self.get_default_model()
         if allowed_tools is not None:
-            raise RuntimeError("ACP harness cannot enforce allowed_tools; refusing to widen tool scope")
+            raise HTTPException(
+                status_code=422,
+                detail="ACP harness cannot enforce allowed_tools; refusing to widen tool scope",
+            )
         if max_turns is not None:
-            raise RuntimeError("ACP harness cannot enforce max_turns; refusing to discard the limit")
+            raise HTTPException(
+                status_code=422,
+                detail="ACP harness cannot enforce max_turns; refusing to discard the limit",
+            )
         if resume_session_id or persist_session:
-            raise RuntimeError("generic ACP runtime does not support persisted Session-tab resume")
+            raise HTTPException(
+                status_code=422,
+                detail="generic ACP runtime does not support persisted Session-tab resume",
+            )
         if images:
-            raise RuntimeError("generic ACP runtime does not advertise image input support")
+            raise HTTPException(
+                status_code=422,
+                detail="generic ACP runtime does not advertise image input support",
+            )
         started = time.monotonic()
-        connection = _ACPConnection(self._manifest(), execution_id=execution_id)
+        connection = _ACPConnection(
+            self._manifest(), execution_id=execution_id, model=effective_model
+        )
         registry = get_process_registry()
+        guardrail_timeout = _surface_guardrails("task")
+        effective_timeout = min(max(1, timeout_seconds), guardrail_timeout)
         try:
             await asyncio.to_thread(connection.start)
             assert connection.process is not None
@@ -492,7 +633,7 @@ class ACPRuntime(AgentRuntime):
                 )
             response, state = await asyncio.wait_for(
                 asyncio.to_thread(connection.prompt, self._combined_prompt(prompt, system_prompt)),
-                timeout=timeout_seconds,
+                timeout=effective_timeout,
             )
             session_id = connection.session_id or ""
             metadata = self._metadata(
@@ -500,10 +641,15 @@ class ACPRuntime(AgentRuntime):
                 execution_id=execution_id,
                 session_id=session_id,
                 tool_count=sum(1 for item in state.execution_log if item.type == "tool_use"),
+                model=effective_model,
             )
             return response, state.execution_log, metadata, session_id
         except asyncio.TimeoutError as exc:
-            raise RuntimeError("ACP headless execution timed out") from exc
+            raise HTTPException(status_code=504, detail="ACP headless execution timed out") from exc
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _map_acp_exception(exc) from exc
         finally:
             if execution_id:
                 registry.unregister(execution_id)

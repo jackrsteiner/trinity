@@ -114,6 +114,14 @@ class AgentState:
 
     def _check_runtime_available(self) -> bool:
         """Check if the configured runtime CLI is available"""
+        if self.agent_runtime.lower() == "acp":
+            try:
+                from .services.acp_runtime import get_acp_runtime
+
+                return get_acp_runtime().is_available()
+            except Exception as e:
+                logger.error(f"ACP runtime check failed: {e}")
+                return False
         if self.agent_runtime == "gemini-cli" or self.agent_runtime == "gemini":
             return self._check_gemini_cli()
         return self._check_claude_code()
