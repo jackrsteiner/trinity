@@ -222,10 +222,16 @@ async def get_chat_history():
 @router.get("/api/chat/session")
 async def get_session_info():
     """Get current session information including token usage"""
+    capabilities = get_runtime().get_capabilities()
     return {
         "session_started": agent_state.session_started,
         "message_count": len(agent_state.conversation_history),
-        "total_cost_usd": agent_state.session_total_cost,
+        "total_cost_usd": (
+            agent_state.session_total_cost
+            if capabilities.cost_reporting != "unavailable"
+            else None
+        ),
+        "cost_available": capabilities.cost_reporting != "unavailable",
         "context_tokens": agent_state.session_context_tokens,
         "context_window": agent_state.session_context_window,
         "context_percent": round(
@@ -238,6 +244,15 @@ async def get_session_info():
 @router.get("/api/model")
 async def get_model():
     """Get the current model being used"""
+    capabilities = get_runtime().get_capabilities()
+    if not capabilities.model_selection:
+        return {
+            "model": None,
+            "runtime": agent_state.agent_runtime,
+            "available": False,
+            "available_models": [],
+            "note": "Model selection is not supported by this runtime.",
+        }
     runtime = agent_state.agent_runtime
 
     if runtime == "gemini-cli" or runtime == "gemini":
@@ -260,6 +275,13 @@ async def get_model():
 async def set_model(request: ModelRequest):
     """Set the model to use for subsequent messages"""
     from fastapi import HTTPException
+
+    adapter = get_runtime()
+    if not adapter.get_capabilities().model_selection:
+        raise HTTPException(
+            status_code=409,
+            detail="Model selection is not supported by this runtime",
+        )
 
     runtime = agent_state.agent_runtime
 
@@ -326,6 +348,10 @@ async def terminate_execution(execution_id: str):
     This allows Claude Code to finish its current operation gracefully.
     """
     registry = get_process_registry()
+    runtime = get_runtime()
+    if await runtime.cancel_execution(execution_id):
+        logger.info(f"[Terminate] Execution {execution_id} cancelled through its runtime protocol")
+        return {"status": "terminated", "execution_id": execution_id}
     # registry.terminate() does up to 7s of synchronous process.wait() (SIGINT grace + SIGKILL grace);
     # run in the default executor so the event loop stays responsive to concurrent /health probes.
     loop = asyncio.get_running_loop()

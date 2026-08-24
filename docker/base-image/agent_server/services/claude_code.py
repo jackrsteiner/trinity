@@ -83,7 +83,12 @@ class ClaudeCodeRuntime(AgentRuntime):
         return RuntimeCapabilities(
             chat_continuity=True,
             session_tab_resume=True,
+            session_load=True,
             mcp_support=True,
+            model_selection=True,
+            system_prompt=True,
+            tool_restrictions=True,
+            prompt_images=True,
             cost_reporting="native",
         )
 

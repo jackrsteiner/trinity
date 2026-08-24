@@ -23,13 +23,21 @@ class RuntimeCapabilities:
     branching on the runtime name (#1187).
 
     ``cost_reporting`` is a string, not a bool: ``"native"`` means the CLI
-    reports a real cost (Claude Code), ``"estimated"`` means Trinity derives
-    it from token counts (Gemini, Codex).
+    reports a real cost, ``"estimated"`` means Trinity derives it from token
+    counts, and ``"unavailable"`` means callers must not display a synthetic
+    value.
     """
     chat_continuity: bool = False
     session_tab_resume: bool = False
+    session_load: bool = False
     mcp_support: bool = False
-    cost_reporting: str = "estimated"  # "native" | "estimated"
+    model_selection: bool = False
+    system_prompt: bool = False
+    tool_restrictions: bool = False
+    prompt_images: bool = False
+    prompt_audio: bool = False
+    cost_reporting: str = "estimated"  # "native" | "estimated" | "unavailable"
+    negotiated: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
@@ -178,13 +186,33 @@ class AgentRuntime(ABC):
         """
         return RuntimeCapabilities()
 
+    def get_capabilities(self) -> RuntimeCapabilities:
+        """Return the current instance capability snapshot.
+
+        Static CLI adapters simply inherit their class declaration. Protocol
+        adapters may override this after negotiation without changing callers.
+        """
+        return self.capabilities()
+
+    async def cancel_execution(self, execution_id: str) -> bool:
+        """Request protocol-native cancellation when supported.
+
+        Returns ``True`` only when the runtime accepted responsibility for the
+        cancellation. The default keeps existing process-registry behavior.
+        """
+        return False
+
+    async def close(self) -> None:
+        """Release any long-lived runtime resources. Existing CLIs own none."""
+
 
 # Accepted AGENT_RUNTIME values (lowercased). Unknown values fail loudly
 # rather than silently selecting Claude (#1187 Phase D).
 _CLAUDE_RUNTIMES = frozenset({"claude-code", "claude"})
 _GEMINI_RUNTIMES = frozenset({"gemini-cli", "gemini"})
 _CODEX_RUNTIMES = frozenset({"codex"})
-KNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES
+_ACP_RUNTIMES = frozenset({"acp"})
+KNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES | _ACP_RUNTIMES
 
 
 def get_runtime() -> AgentRuntime:
@@ -213,6 +241,10 @@ def get_runtime() -> AgentRuntime:
         from .codex_runtime import get_codex_runtime
         logger.info("Using OpenAI Codex runtime")
         return get_codex_runtime()
+    if runtime_type in _ACP_RUNTIMES:
+        from .acp_runtime import get_acp_runtime
+        logger.info("Using generic ACP runtime")
+        return get_acp_runtime()
     if runtime_type in _CLAUDE_RUNTIMES:
         from .claude_code import get_claude_runtime
         logger.info("Using Claude Code runtime")
@@ -223,4 +255,3 @@ def get_runtime() -> AgentRuntime:
         f"Known runtimes: {sorted(KNOWN_RUNTIMES)}. "
         "Refusing to silently fall back to Claude Code."
     )
-

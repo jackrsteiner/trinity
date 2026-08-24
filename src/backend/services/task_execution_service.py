@@ -79,6 +79,14 @@ def _resolve_agent_runtime(agent_name: str) -> str:
     except Exception:
         return "claude-code"
 
+
+def gate_system_prompt(runtime: str, system_prompt: Optional[str]) -> Optional[str]:
+    """Disable Trinity system instructions where the runtime has no channel.
+
+    This is integration-layer feature gating, not a protocol translation.
+    """
+    return None if runtime.lower() == "acp" else system_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -1332,6 +1340,13 @@ class TaskExecutionService:
                 effective_system_prompt = (
                     platform_prompt + "\n\n" + system_prompt if system_prompt else platform_prompt
                 )
+
+            # ACP v1 has no portable system-instruction channel. The platform
+            # prompt is Trinity integration policy, so gate it here instead of
+            # teaching the generic protocol adapter to disguise it as user text.
+            effective_system_prompt = gate_system_prompt(
+                agent_runtime, effective_system_prompt
+            )
 
             payload = {
                 "message": message,

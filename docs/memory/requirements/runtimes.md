@@ -276,6 +276,61 @@ a fourth runtime.
 
 ---
 
+## ACP-001 — Generic Agent Client Protocol runtime
+
+- **Status:** 🚧 In Progress
+- **Decision record:** [ADR 0002](../../adr/0002-generic-acp-runtime.md)
+- **Description:** Trinity can run a conforming ACP agent through one generic,
+  harness-neutral `ACPRuntime` implemented with the official
+  `agent-client-protocol` Python SDK.
+
+**Functional requirements:**
+
+- Initialize and negotiate the ACP protocol version; expose the agent's raw
+  advertised capabilities and a conservative normalized Trinity capability
+  snapshot.
+- Support `session/new`, capability-gated `session/load`, `session/prompt`,
+  streamed session updates, permission requests/responses, cancellation, and
+  bounded connection/process shutdown.
+- Keep interactive ACP session continuity while its live protocol session
+  exists. A headless task owns an independent process/session. Never emulate a
+  session load after the live process is gone when `loadSession` is absent.
+- Reject or disable unavailable model selection, cost/usage telemetry, MCP,
+  content types, resume, and other Trinity features instead of synthesizing
+  them.
+- Translate standard ACP message/tool/usage updates into Trinity's neutral
+  response, execution-log, and metadata types without relying on ACP-agent or
+  provider identity.
+- Treat permission requests as interaction only. Default deny when no policy or
+  operator response channel is configured.
+
+**Configuration and security:**
+
+- The template runtime block selects `type: acp` and supplies a generic
+  executable plus argument vector. The process is launched without a shell.
+- `ACPRuntime` contains no harness, provider, executable-name, model-name, or
+  credential-name branches and no agent-specific environment workarounds.
+- Container capabilities, filesystem and mount policy, credential injection,
+  UID, network policy, and process isolation remain outside ACP. ACP is never
+  represented as Trinity's security boundary.
+
+**Verification:**
+
+- SDK-backed protocol tests cover negotiation, new/load capability behavior,
+  prompt streaming, permission outcomes, cancellation, protocol/process errors,
+  and clean shutdown.
+- Regression tests cover capability-based gating for resume, model selection,
+  cost telemetry, and MCP.
+- Hermes ACP and DeepSeek Harness ACP smoke tests are opt-in, list exact image,
+  command, and credential prerequisites, and record skipped/not-run status
+  honestly when prerequisites are absent.
+
+**Out of scope:** harness-specific adapters or fixes; custom JSON-RPC framing or
+ACP schema copies; security-policy enforcement through ACP permissions;
+emulation of Trinity-only semantics; remote ACP transports in the first slice.
+
+---
+
 ## 41. Model-Conditional Prompt Tiers (ent#243)
 
 ### 41.1 Tier Resolution — the axis is the MODEL, not the runtime

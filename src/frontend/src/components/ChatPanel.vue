@@ -57,9 +57,14 @@
 
       <div class="flex items-center space-x-2">
         <!-- Model selector -->
-        <div class="w-44">
+        <div v-if="runtimeCapabilities.model_selection" class="w-44">
           <ModelSelector v-model="selectedModel" compact placeholder="Default model" />
         </div>
+        <span
+          v-else
+          class="text-xs text-gray-500 dark:text-gray-400"
+          title="The selected runtime does not expose portable model selection"
+        >Model managed by runtime</span>
 
         <!-- New Chat button -->
         <button
@@ -270,6 +275,29 @@ const focusChatInput = () => {
 
 // Model selection
 const selectedModel = ref(localStorage.getItem('trinity_chat_model') || '')
+const runtimeCapabilities = ref({
+  model_selection: true,
+  session_load: true,
+  cost_reporting: 'estimated',
+})
+
+const loadRuntimeCapabilities = async () => {
+  if (!props.agentName || props.agentStatus !== 'running') return
+  try {
+    const response = await axios.get(
+      `/api/agents/${props.agentName}/runtime/capabilities`,
+      { headers: authStore.authHeader }
+    )
+    runtimeCapabilities.value = response.data.capabilities || runtimeCapabilities.value
+    if (!runtimeCapabilities.value.model_selection) selectedModel.value = ''
+    if (!runtimeCapabilities.value.session_load) {
+      resumeSessionIdLocal.value = null
+      resumeExecutionIdLocal.value = null
+    }
+  } catch {
+    // Older agent images do not expose capabilities. Preserve their existing UI.
+  }
+}
 
 // Playbooks (for empty-state quick actions)
 const playbooks = ref([])
@@ -639,14 +667,16 @@ const sendMessage = async (userMessage, files = []) => {
       create_new_session: !currentSessionId.value,
       chat_session_id: currentSessionId.value || undefined,
       async_mode: true,
-      model: selectedModel.value || undefined,
+      model: runtimeCapabilities.value.model_selection
+        ? (selectedModel.value || undefined)
+        : undefined,
       files: files.length > 0 ? files : undefined,
     }
 
     // EXEC-023: Include resume_session_id for ALL messages in resume mode
     // The /task endpoint is stateless - it doesn't use --continue.
     // We must keep passing resume_session_id so Claude Code uses --resume for every message.
-    if (resumeSessionIdLocal.value) {
+    if (resumeSessionIdLocal.value && runtimeCapabilities.value.session_load) {
       payload.resume_session_id = resumeSessionIdLocal.value
       // Note: We intentionally do NOT clear resumeSessionIdLocal here.
       // All messages in a resumed session need --resume to maintain context.
@@ -731,6 +761,7 @@ watch(selectedModel, (val) => {
 watch(() => props.agentStatus, (newStatus) => {
   if (newStatus === 'running') {
     loadSessions()
+    loadRuntimeCapabilities()
     checkVoiceAvailability()
     loadPlaybooks()
   }
@@ -757,6 +788,7 @@ watch(() => props.agentName, () => {
   closeSSE()
   if (props.agentStatus === 'running') {
     loadSessions()
+    loadRuntimeCapabilities()
     loadPlaybooks()
   }
 })
@@ -766,6 +798,7 @@ onMounted(() => {
   document.addEventListener('click', handleClickOutside)
   if (props.agentStatus === 'running') {
     loadSessions()
+    loadRuntimeCapabilities()
     checkVoiceAvailability()
     loadPlaybooks()
   }

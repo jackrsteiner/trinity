@@ -14,6 +14,7 @@ from fastapi import APIRouter
 from ..models import AgentInfo
 from ..safe_yaml import AliasPolicy, load_hardened_yaml
 from ..state import agent_state
+from ..services.runtime_adapter import get_runtime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -73,6 +74,19 @@ def _diagnostics() -> Dict[str, Any]:
         "conversation_history_size": len(agent_state.conversation_history),
         "conversation_history_limit": agent_state.history_limit,
     }
+
+
+def _runtime_capability_payload() -> Dict[str, Any]:
+    """Return the runtime's current conservative/negotiated feature snapshot."""
+    runtime = get_runtime()
+    payload: Dict[str, Any] = {
+        "runtime": agent_state.agent_runtime,
+        "capabilities": runtime.get_capabilities().to_dict(),
+    }
+    raw = getattr(runtime, "raw_capabilities", None)
+    if raw:
+        payload["protocol_capabilities"] = raw
+    return payload
 
 
 def _clone_status() -> str:
@@ -174,6 +188,7 @@ async def health_check():
         "agent_name": agent_state.agent_name,
         "runtime": agent_state.agent_runtime,
         "runtime_available": agent_state.runtime_available,
+        "runtime_capabilities": _runtime_capability_payload()["capabilities"],
         # Backward compatibility
         "claude_available": agent_state.claude_code_available,
         "message_count": len(agent_state.conversation_history),
@@ -192,6 +207,12 @@ async def health_check():
         "clone_status": _clone_status(),
         "diagnostics": _diagnostics(),
     }
+
+
+@router.get("/api/runtime/capabilities")
+async def runtime_capabilities():
+    """Expose feature availability for backend and UI gating."""
+    return _runtime_capability_payload()
 
 
 @router.get("/api/template/info")

@@ -623,9 +623,13 @@ async def deploy_local_agent_logic(
         runtime_config = template_data.get("runtime", {})
         runtime_type = None
         runtime_model = None
+        runtime_command = None
+        runtime_args = None
         if isinstance(runtime_config, dict):
             runtime_type = runtime_config.get("type")
             runtime_model = runtime_config.get("model")
+            runtime_command = runtime_config.get("command")
+            runtime_args = runtime_config.get("args")
         elif isinstance(runtime_config, str):
             runtime_type = runtime_config
 
@@ -634,7 +638,9 @@ async def deploy_local_agent_logic(
             template=f"local:{version_name}",
             resources=template_data.get("resources", {"cpu": "2", "memory": "4g"}),
             runtime=runtime_type,
-            runtime_model=runtime_model
+            runtime_model=runtime_model,
+            runtime_command=runtime_command,
+            runtime_args=runtime_args,
         )
 
         # 9b. Process credentials before agent creation

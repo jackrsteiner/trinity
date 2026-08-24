@@ -53,6 +53,13 @@ def test_capabilities_to_dict_is_serializable_for_callers():
     assert d == {
         "chat_continuity": True,
         "session_tab_resume": False,
+        "session_load": True,
         "mcp_support": True,
+        "model_selection": True,
+        "system_prompt": True,
+        "tool_restrictions": True,
+        "prompt_images": False,
+        "prompt_audio": False,
         "cost_reporting": "estimated",
+        "negotiated": False,
     }

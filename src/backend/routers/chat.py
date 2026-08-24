@@ -628,6 +628,31 @@ async def clear_agent_activity(
 
 # Model Routes
 
+@router.get("/{name}/runtime/capabilities")
+async def get_agent_runtime_capabilities(
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """Proxy the runtime feature snapshot used by UI feature gates."""
+    container = get_agent_container(name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if container.status != "running":
+        raise HTTPException(status_code=400, detail="Agent is not running")
+    try:
+        async with agent_httpx_client(name) as client:
+            response = await client.get(
+                f"http://agent-{name}:8000/api/runtime/capabilities",
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        logging.getLogger("trinity.errors").error(
+            f"Failed to get runtime capabilities for {name}: {e}"
+        )
+        raise HTTPException(status_code=503, detail="Failed to get runtime capabilities")
+
 @router.get("/{name}/model")
 async def get_agent_model(
     name: str = Depends(get_authorized_agent),

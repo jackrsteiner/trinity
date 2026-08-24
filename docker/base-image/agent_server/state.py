@@ -2,6 +2,7 @@
 Agent state management for the agent server.
 """
 import os
+import shutil
 import subprocess
 import logging
 import threading
@@ -114,6 +115,11 @@ class AgentState:
 
     def _check_runtime_available(self) -> bool:
         """Check if the configured runtime CLI is available"""
+        if self.agent_runtime.lower() == "acp":
+            # Avoid importing the services package while the state singleton is
+            # still being constructed (services.activity_tracking imports us).
+            command = os.getenv("AGENT_RUNTIME_COMMAND", "").strip()
+            return bool(command and shutil.which(command))
         if self.agent_runtime == "gemini-cli" or self.agent_runtime == "gemini":
             return self._check_gemini_cli()
         return self._check_claude_code()

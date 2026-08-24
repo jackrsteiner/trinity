@@ -4,6 +4,9 @@ pytest-asyncio>=0.24.0
 pytest-timeout>=2.3.0
 pytest-html>=4.1.0
 pytest-cov>=6.0.0
+# ACP runtime tests import the same official SDK installed in the agent image.
+# Keep the exact pin aligned with docker/base-image/Dockerfile.
+agent-client-protocol==0.12.1
 # Property-based testing (#1771 / P-38 `/edge-cases`). Used by
 # tests/unit/test_1771*_properties.py.
 #

@@ -116,7 +116,8 @@ RUN python3 -m pip install --user --upgrade pip && \
         python-multipart \
         pyyaml \
         rich \
-        cryptography
+        cryptography \
+        agent-client-protocol==0.12.1
 
 RUN mkdir -p /home/developer/.claude-agent
 
@@ -249,4 +250,3 @@ RUN mkdir -p /var/lib/trinity && \
 USER developer
 
 CMD ["/app/startup.sh"]
-
