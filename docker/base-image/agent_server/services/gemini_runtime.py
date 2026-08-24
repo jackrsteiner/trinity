@@ -122,6 +122,9 @@ class GeminiRuntime(AgentRuntime):
             chat_continuity=True,
             session_tab_resume=False,
             mcp_support=True,
+            model_selection=True,
+            system_prompt=True,
+            tool_restrictions=True,
             cost_reporting="estimated",
         )
 
@@ -792,4 +795,3 @@ def get_gemini_runtime() -> GeminiRuntime:
     if _gemini_runtime is None:
         _gemini_runtime = GeminiRuntime()
     return _gemini_runtime
-

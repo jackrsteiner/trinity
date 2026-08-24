@@ -109,6 +109,13 @@ schedule_pull_workers(app)
 schedule_pending_pull_result_resend(app)
 
 
+@app.on_event("shutdown")
+async def close_agent_runtime() -> None:
+    """Give protocol runtimes a clean connection/process shutdown."""
+    from .services.runtime_adapter import get_runtime
+    await get_runtime().close()
+
+
 def run_server():
     """Run the agent server with uvicorn"""
     import uvicorn

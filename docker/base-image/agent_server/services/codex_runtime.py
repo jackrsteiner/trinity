@@ -1061,7 +1061,11 @@ class CodexRuntime(AgentRuntime):
         return RuntimeCapabilities(
             chat_continuity=True,        # codex exec resume <thread_id>
             session_tab_resume=False,    # MVP: Session tab stays Claude/Gemini
+            session_load=True,           # codex exec resume <thread_id>
             mcp_support=True,            # codex mcp add
+            model_selection=True,
+            system_prompt=True,
+            tool_restrictions=True,
             cost_reporting="estimated",  # no native cost → derived from tokens
         )
 

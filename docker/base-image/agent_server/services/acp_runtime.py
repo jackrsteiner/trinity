@@ -277,7 +277,11 @@ class ACPRuntime(AgentRuntime):
 
     @classmethod
     def capabilities(cls) -> RuntimeCapabilities:
-        return RuntimeCapabilities(chat_continuity=True, mcp_support=True)
+        return RuntimeCapabilities(
+            chat_continuity=True,
+            mcp_support=True,
+            cost_reporting="unavailable",
+        )
 
     def get_capabilities(self) -> RuntimeCapabilities:
         return self._capabilities
