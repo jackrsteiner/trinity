@@ -144,6 +144,12 @@ class ProcessRegistry:
             # `success` to the schedule_executions row.
             self._recently_completed[execution_id] = time.time()
 
+    def mark_terminated(self, execution_id: str) -> None:
+        """Record a protocol-native cancellation without sending an OS signal."""
+        with self._lock:
+            if execution_id in self._processes:
+                self._terminated[execution_id] = time.time()
+
     def terminate(self, execution_id: str, graceful_timeout: int = 5) -> dict:
         """
         Terminate a running process.
