@@ -124,6 +124,24 @@ Run it from the Actions tab with **ACP provider image smoke → Run workflow**, 
 push a change to `test/acp-provider-image-smoke`. Missing credentials are hard
 failures; this workflow never reports a skipped live pass.
 
+### Recorded provider-image result
+
+GitHub Actions run
+[`32699619662`](https://github.com/jackrsteiner/trinity/actions/runs/32699619662)
+passed both credentialed jobs on 2026-08-24:
+
+- Hermes ACP with Gemini streamed a real response, advertised image prompts and
+  session load/resume, completed two permission interactions, settled
+  cancellation, and shut down cleanly.
+- DeepSeek Harness ACP streamed a real response, correctly advertised no image
+  prompts or session load/resume, completed one permission interaction, settled
+  cancellation, and shut down cleanly.
+
+Both jobs built the Trinity base image and their pinned provider image from
+source before running the acceptance script. The earlier direct-host result
+above remains recorded as skipped because those harnesses were not installed
+locally; it is not being relabeled as a pass.
+
 Upstream references:
 
 - <https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/acp.md>
