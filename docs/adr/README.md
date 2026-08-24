@@ -9,3 +9,4 @@ Each ADR is numbered (`NNNN-slug.md`) and stays as the historical record of a de
 | # | Title | Status |
 |---|---|---|
 | 0001 | [Claude Agent SDK migration evaluation](0001-claude-agent-sdk-migration.md) | Proposed |
+| 0002 | [Generic ACP runtime boundary](0002-generic-acp-runtime.md) | Accepted |

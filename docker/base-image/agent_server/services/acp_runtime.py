@@ -14,7 +14,7 @@ import json
 import logging
 import subprocess
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,13 +66,79 @@ _CANCEL_GRACE_SECONDS = 5
 _SHUTDOWN_TIMEOUT_SECONDS = 2
 _STDERR_LIMIT_BYTES = 64 * 1024
 
+# The same JSON file Claude's read-only hook and Codex's sandbox resolver
+# consume (``~/.trinity/read-only-config.json`` → ``enabled``). Module-level so
+# tests can repoint it.
+_READ_ONLY_CONFIG = Path("/home/developer") / ".trinity" / "read-only-config.json"
+
+# ACP option kinds that express a denial through the protocol's own option
+# mechanism. Preferred over DeniedOutcome("cancelled"), which some agents
+# treat as "the whole turn was cancelled" rather than "this action was denied".
+_REJECT_OPTION_KINDS = frozenset({"reject_once", "reject_always"})
+
 
 class ACPRuntimeError(RuntimeError):
     """A protocol, lifecycle, or process failure in the generic ACP adapter."""
 
 
-class ACPFeatureUnavailable(ACPRuntimeError):
-    """A caller requested a feature the ACP agent did not advertise."""
+class ACPFeatureUnavailable(HTTPException, ACPRuntimeError):
+    """A caller requested a feature the ACP agent did not advertise.
+
+    Doubles as an ``HTTPException(409)`` (the ``ResumeLockBusy`` pattern) so the
+    agent-server routes surface a legible refusal instead of a generic 500, and
+    the backend classifies it as an agent-side error — never AUTH (503), which
+    would feed the dispatch breaker a false signal.
+    """
+
+    def __init__(self, detail: str) -> None:
+        HTTPException.__init__(self, status_code=409, detail=detail)
+
+    def __str__(self) -> str:  # keep pytest.raises(match=...) on the detail text
+        return self.detail
+
+
+def _read_only_enabled() -> bool:
+    """True when the backend has put this agent in read-only mode.
+
+    Loader semantics mirror Codex's ``_is_read_only`` (CSO #1187 finding 3:
+    the unreadable/corrupt-file case must fail the same direction across
+    runtimes — open, with a WARNING). What differs is what an *enabled* flag
+    means here: ACP has no portable enforcement channel at all, so the runtime
+    REFUSES the turn rather than running unenforced (see
+    ``_refuse_if_read_only``).
+    """
+    try:
+        raw = _READ_ONLY_CONFIG.read_text()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning(
+            "[ACP] read-only config unreadable (%s); treating as not read-only", exc
+        )
+        return False
+    try:
+        return bool(json.loads(raw).get("enabled"))
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "[ACP] read-only config malformed (%s); treating as not read-only", exc
+        )
+        return False
+
+
+def _refuse_if_read_only() -> None:
+    """Fail closed on read-only mode.
+
+    Claude enforces read-only via hooks and Codex via its sandbox; ACP v1 has
+    no portable equivalent, and running the turn anyway would present the
+    owner's read-only toggle as active while enforcing nothing. Refusing is the
+    only non-silent option (ADR 0002 §3: never emulate, never silently drop).
+    """
+    if _read_only_enabled():
+        raise ACPFeatureUnavailable(
+            "This agent is in read-only mode, which the generic ACP runtime "
+            "cannot enforce. Refusing to execute unenforced — disable read-only "
+            "mode or use a runtime with native read-only enforcement."
+        )
 
 
 class _AsyncioProcessHandle:
@@ -122,6 +188,22 @@ class _TurnCollector:
         if self.execution_id:
             get_process_registry().publish_log_entry(self.execution_id, sanitized)
 
+    def reset_turn(self, execution_id: Optional[str]) -> None:
+        """Start a fresh turn on a persistent chat session.
+
+        Clears every per-turn quantity — including ``cost_usd``, which is a
+        billing amount: leaving it set would re-add turn 1's cost to the
+        session total on every later turn that emits no ``UsageUpdate``.
+        ``context_used``/``context_size`` deliberately survive: they describe
+        the live session's window occupancy (last-known semantics), not this
+        turn's spend.
+        """
+        self.execution_id = execution_id
+        self.response_parts.clear()
+        self.execution_log.clear()
+        self.raw_messages.clear()
+        self.cost_usd = None
+
     async def request_permission(
         self,
         session_id: str,
@@ -142,6 +224,20 @@ class _TurnCollector:
             decision = self.permission_resolver(session_id, tool_call, options)
             option_id = await decision if inspect.isawaitable(decision) else decision
         valid_ids = {option.option_id for option in options}
+        if option_id not in valid_ids:
+            # Default deny: prefer the agent's own reject-kind option so the
+            # denial is expressed through the protocol's option mechanism.
+            # DeniedOutcome("cancelled") is the last resort — some agents read
+            # it as "the turn was cancelled" rather than "this action was
+            # denied", which can abort the whole prompt.
+            option_id = next(
+                (
+                    option.option_id
+                    for option in options
+                    if option.kind in _REJECT_OPTION_KINDS
+                ),
+                None,
+            )
         if option_id in valid_ids:
             outcome = AllowedOutcome(outcome="selected", option_id=option_id)
         else:
@@ -359,17 +455,34 @@ class ACPRuntime(AgentRuntime):
         return result
 
     async def _drain_stderr(self, process: asyncio.subprocess.Process, collector: _TurnCollector) -> None:
+        """Capture up to ``_STDERR_LIMIT_BYTES`` of agent stderr, then DISCARD.
+
+        The drain must never stop reading: a chatty agent that fills the kernel
+        pipe buffer blocks on its next stderr write and wedges the prompt
+        mid-turn. Past the cap, bytes are read and dropped so backpressure can
+        never build. A single over-long line (asyncio stream limit) degrades to
+        a raw byte drain instead of killing the task.
+        """
         if process.stderr is None:
             return
         total = 0
-        while total < _STDERR_LIMIT_BYTES:
-            line = await process.stderr.readline()
-            if not line:
-                break
-            text = sanitize_text(line.decode("utf-8", errors="replace").rstrip())
-            total += len(line)
-            if text:
-                collector.stderr.append(text)
+        try:
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    return
+                if total >= _STDERR_LIMIT_BYTES:
+                    continue  # keep the pipe flowing; discard past the cap
+                total += len(line)
+                text = sanitize_text(line.decode("utf-8", errors="replace").rstrip())
+                if text:
+                    collector.stderr.append(text)
+        except (ValueError, asyncio.LimitOverrunError):
+            # readline() raises when one line exceeds the stream limit; fall
+            # back to draining raw bytes so the child never blocks on stderr.
+            with suppress(Exception):
+                while await process.stderr.read(_STDERR_LIMIT_BYTES):
+                    pass
 
     async def _open_session(
         self,
@@ -385,6 +498,12 @@ class ACPRuntime(AgentRuntime):
             env=self._env_provider(),
             cwd=self._cwd,
             transport_kwargs={"shutdown_timeout": _SHUTDOWN_TIMEOUT_SECONDS},
+            # SDK 0.12.1 marks a handful of newer methods "unstable"
+            # (session/close — which _close_session uses when advertised —
+            # plus elicitation and fork/resume) and warns per call unless this
+            # flag is set; it changes no wire behavior for the stable methods.
+            # Deterministic because the SDK is exact-pinned in the base image
+            # and tests/requirements-test.txt.
             use_unstable_protocol=True,
         )
         try:
@@ -521,8 +640,12 @@ class ACPRuntime(AgentRuntime):
             cache_read_tokens=(usage.cached_read_tokens or 0) if usage else 0,
             cache_creation_tokens=(usage.cached_write_tokens or 0) if usage else 0,
             context_window=session.collector.context_size,
-            status="success" if response.stop_reason != "cancelled" else "error",
-            error_code=None if response.stop_reason != "cancelled" else "AGENT_ERROR",
+            # "cancelled" and "refusal" are the two stop reasons that mean the
+            # turn did NOT produce the requested answer. Budget stops
+            # (max_tokens / max_turn_requests) still return partial text and
+            # stay "success", matching how CLI runtimes report truncation.
+            status="success" if response.stop_reason not in {"cancelled", "refusal"} else "error",
+            error_code=None if response.stop_reason not in {"cancelled", "refusal"} else "AGENT_ERROR",
         )
         return (
             "".join(session.collector.response_parts),
@@ -530,6 +653,35 @@ class ACPRuntime(AgentRuntime):
             metadata,
             list(session.collector.raw_messages),
         )
+
+    @asynccontextmanager
+    async def _map_protocol_errors(self):
+        """Convert protocol/lifecycle failures into typed HTTP errors.
+
+        The routers unpack the runtime result directly, so anything that is not
+        an ``HTTPException`` surfaces as a bare 500 with no detail. Mapping here
+        mirrors the Codex precedent: agent/protocol failures → **502** (which
+        the backend classifies as AGENT_ERROR), timeouts → 504 (raised in
+        ``_prompt``), capability refusals → 409 (``ACPFeatureUnavailable``).
+        Deliberately NEVER 503/429 — the backend reads those as AUTH/rate
+        signals (dispatch breaker, SUB-003), and a harness-neutral adapter has
+        no portable way to prove an auth failure.
+        """
+        try:
+            yield
+        except HTTPException:
+            raise  # ACPFeatureUnavailable (409) and the 504 timeout pass through
+        except (ACPRuntimeError, RequestError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"ACP agent error: {sanitize_text(str(exc))}",
+            ) from exc
+        except Exception as exc:  # malformed SDK payloads, connection loss, …
+            logger.exception("[ACP] unexpected protocol-layer failure")
+            raise HTTPException(
+                status_code=502,
+                detail=f"ACP agent error: {type(exc).__name__}: {sanitize_text(str(exc))}",
+            ) from exc
 
     @staticmethod
     def _reject_nonportable_controls(
@@ -563,16 +715,15 @@ class ACPRuntime(AgentRuntime):
         execution_id: Optional[str] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         self._reject_nonportable_controls(model=model, system_prompt=system_prompt)
-        if not continue_session and self._chat_session is not None:
-            await self._close_session(self._chat_session)
-            self._chat_session = None
-        if self._chat_session is None or self._chat_session.closed:
-            self._chat_session = await self._open_session(execution_id=execution_id)
-        self._chat_session.collector.execution_id = execution_id
-        self._chat_session.collector.response_parts.clear()
-        self._chat_session.collector.execution_log.clear()
-        self._chat_session.collector.raw_messages.clear()
-        return await self._prompt(self._chat_session, prompt, execution_id=execution_id)
+        _refuse_if_read_only()
+        async with self._map_protocol_errors():
+            if not continue_session and self._chat_session is not None:
+                await self._close_session(self._chat_session)
+                self._chat_session = None
+            if self._chat_session is None or self._chat_session.closed:
+                self._chat_session = await self._open_session(execution_id=execution_id)
+            self._chat_session.collector.reset_turn(execution_id)
+            return await self._prompt(self._chat_session, prompt, execution_id=execution_id)
 
     async def execute_headless(
         self,
@@ -586,41 +737,72 @@ class ACPRuntime(AgentRuntime):
         resume_session_id: Optional[str] = None,
         persist_session: bool = False,
         images: Optional[List[Dict]] = None,
-    ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
+    ) -> Tuple[str, List[Dict[str, Any]], ExecutionMetadata, str]:
+        # Second tuple element is the raw sanitized message stream (the
+        # /api/task contract every runtime honors), not the typed
+        # ExecutionLogEntry list — that one rides inside the stream.
         self._reject_nonportable_controls(
             model=model,
             system_prompt=system_prompt,
             allowed_tools=allowed_tools,
             max_turns=max_turns,
         )
-        session = await self._open_session(
-            execution_id=execution_id,
-            resume_session_id=resume_session_id,
-        )
-        try:
-            response, log, metadata, raw_messages = await self._prompt(
-                session,
-                prompt,
+        _refuse_if_read_only()
+        async with self._map_protocol_errors():
+            session = await self._open_session(
                 execution_id=execution_id,
-                images=images,
-                timeout_seconds=timeout_seconds,
+                resume_session_id=resume_session_id,
             )
-            return response, raw_messages, metadata, session.session_id
-        finally:
-            await self._close_session(session)
+            try:
+                response, log, metadata, raw_messages = await self._prompt(
+                    session,
+                    prompt,
+                    execution_id=execution_id,
+                    images=images,
+                    timeout_seconds=timeout_seconds,
+                )
+                return response, raw_messages, metadata, session.session_id
+            finally:
+                await self._close_session(session)
 
     async def cancel_execution(self, execution_id: str) -> bool:
         active = self._active_prompts.get(execution_id)
         if active is None:
             return False
         session, done = active
-        await session.connection.cancel(session_id=session.session_id)
+        try:
+            # Bounded: a wedged agent must not hang the terminate endpoint.
+            # An undeliverable protocol cancel returns False so the caller
+            # falls back to the process registry's OS-signal termination.
+            await asyncio.wait_for(
+                session.connection.cancel(session_id=session.session_id),
+                timeout=_CANCEL_GRACE_SECONDS,
+            )
+        except Exception as exc:  # incl. asyncio.TimeoutError
+            logger.warning(
+                "[ACP] protocol cancel for %s failed (%s); falling back to signal termination",
+                execution_id,
+                exc,
+            )
+            return False
         get_process_registry().mark_terminated(execution_id)
         try:
             await asyncio.wait_for(done.wait(), timeout=_CANCEL_GRACE_SECONDS)
         except asyncio.TimeoutError:
             await self._close_session(session)
         return True
+
+    async def reset_chat(self) -> None:
+        """Close the persistent interactive session on chat reset.
+
+        Trinity's transcript reset must reach the runtime: unlike the CLI
+        runtimes (stateless between invocations), the ACP chat session is a
+        live child process holding the full prior context — "New Chat" without
+        this would silently carry it forward (ADR 0002 §7).
+        """
+        if self._chat_session is not None:
+            await self._close_session(self._chat_session)
+            self._chat_session = None
 
     async def close(self) -> None:
         sessions = {id(session): session for session, _ in self._active_prompts.values()}

@@ -78,6 +78,82 @@ def validate_runtime(runtime: Optional[str]) -> None:
         )
 
 
+# Mirror of the agent-side `acp_launch.ACPLaunchConfig` bounds (base image —
+# not importable from the backend; keep the two in sync, like
+# KNOWN_RUNTIME_NAMES above).
+_ACP_MAX_ARGS = 128
+
+
+def validate_acp_launch(
+    runtime: Optional[str],
+    runtime_command: Optional[str],
+    runtime_args: Optional[list],
+    runtime_model: Optional[str],
+) -> None:
+    """Reject an unbuildable or contradictory ACP launch envelope at create time.
+
+    Without this, `runtime: acp` with no `command` creates an agent whose
+    runtime can never construct (`load_acp_launch_config` raises on boot), and
+    `runtime: acp` with a `model:` fails every turn at execution time — both
+    cryptic, both catchable here as named 400s. The bounds mirror the
+    agent-side ``ACPLaunchConfig`` validator so a config that passes creation
+    cannot fail the in-container parse.
+
+    Raises:
+        HTTPException(400): named error per violated constraint.
+    """
+    is_acp = (runtime or "").lower() == "acp"
+    if not is_acp:
+        if runtime_command or runtime_args:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "acp_launch_config_wrong_runtime: runtime_command/runtime_args "
+                    "only apply to `runtime: acp` — they would be silently ignored "
+                    f"by runtime {runtime or 'claude-code'!r}."
+                ),
+            )
+        return
+    if not runtime_command or not runtime_command.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "acp_runtime_command_required: `runtime: acp` needs a non-empty "
+                "`command` (the ACP agent executable) in the template runtime block."
+            ),
+        )
+    if "\x00" in runtime_command:
+        raise HTTPException(
+            status_code=400,
+            detail="acp_runtime_command_invalid: command contains a NUL byte.",
+        )
+    if runtime_model:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "acp_runtime_model_unsupported: ACP v1 has no portable model "
+                "selection — configure the model in the ACP agent itself and "
+                "drop `model:` from the runtime block."
+            ),
+        )
+    args = runtime_args or []
+    if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
+        raise HTTPException(
+            status_code=400,
+            detail="acp_runtime_args_invalid: `args` must be a list of strings.",
+        )
+    if len(args) > _ACP_MAX_ARGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"acp_runtime_args_invalid: at most {_ACP_MAX_ARGS} arguments.",
+        )
+    if any("\x00" in arg for arg in args):
+        raise HTTPException(
+            status_code=400,
+            detail="acp_runtime_args_invalid: an argument contains a NUL byte.",
+        )
+
+
 def is_system_agent_name(agent_name: str) -> bool:
     """#1816: is this the platform orchestrator (``trinity-system``)?
 

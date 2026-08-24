@@ -108,7 +108,17 @@ reported as data but must not silently enable a Trinity feature.
 ACP permission requests are user-interaction signals. They may pause a prompt
 and inform an operator decision, but they are not Trinity's security boundary.
 Approval does not grant container privileges and denial is not a substitute for
-enforcement.
+enforcement. The default (no resolver, or an invalid choice) is a denial
+expressed through the agent's own reject-kind option when one is offered;
+`DeniedOutcome("cancelled")` is the last resort, because some agents read it as
+a whole-turn cancellation rather than a per-action denial.
+
+Trinity features with no portable ACP enforcement channel fail **closed**, not
+silent: an agent in read-only mode is refused (the runtime cannot enforce the
+toggle, and running unenforced would present it as active), and guardrails are
+not wired rather than partially imitated. An unreadable/corrupt read-only flag
+file stays fail-open with a warning — the same direction as the Codex loader,
+so the ambiguous case cannot diverge across runtimes.
 
 Container capabilities, filesystem access, bind mounts, credential scope, UID,
 network egress, and other mandatory policy controls remain enforced outside ACP
@@ -125,6 +135,20 @@ logs or command arguments.
 Each headless execution owns an ACP process and session so concurrent tasks do
 not share mutable protocol state. Interactive chat may keep one process/session
 alive for continuity and must close it on session reset or server shutdown.
+
+### 8. Typed failures, fail-open reads
+
+Runtime failures surface as typed HTTP errors, mirroring the Codex precedent:
+capability refusals → 409, protocol/agent/process failures → 502 (backend
+AGENT_ERROR), timeout → 504. Deliberately never 503/429 — the backend treats
+those as AUTH/rate signals, and a harness-neutral adapter cannot portably
+prove either, so mis-signaling would feed the dispatch breaker false data.
+
+`get_runtime()`'s fail-loud contract applies to execution paths only.
+Observability surfaces (`/health`, session/model reads) consume a fail-open
+capability snapshot that degrades to permissive legacy defaults when the
+runtime cannot be constructed: `/health` is unauthenticated and load-bearing,
+so a launch-envelope typo must degrade a field, never 500 the endpoint.
 
 ## Consequences
 

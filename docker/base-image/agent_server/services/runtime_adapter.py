@@ -202,6 +202,15 @@ class AgentRuntime(ABC):
         """
         return False
 
+    async def reset_chat(self) -> None:
+        """React to a chat/session reset.
+
+        CLI runtimes are stateless between invocations, so the default is a
+        no-op. A protocol runtime holding a live child process (ACP) overrides
+        this to close it — otherwise "New Chat" clears Trinity's transcript
+        while the agent process silently keeps the prior context.
+        """
+
     async def close(self) -> None:
         """Release any long-lived runtime resources. Existing CLIs own none."""
 
@@ -255,3 +264,42 @@ def get_runtime() -> AgentRuntime:
         f"Known runtimes: {sorted(KNOWN_RUNTIMES)}. "
         "Refusing to silently fall back to Claude Code."
     )
+
+
+# Pre-capability behavior for surfaces that must never 500 on runtime
+# misconfiguration: model selection rendered, resume allowed, cost shown.
+# get_runtime()'s fail-loud contract is for EXECUTION paths; observability
+# surfaces (/health, /api/chat/session, /api/model GET) degrade to this instead.
+_LEGACY_CAPABILITIES = RuntimeCapabilities(
+    chat_continuity=True,
+    session_tab_resume=True,
+    session_load=True,
+    mcp_support=True,
+    model_selection=True,
+    system_prompt=True,
+    tool_restrictions=True,
+    prompt_images=True,
+    cost_reporting="estimated",
+)
+
+
+def get_capabilities_snapshot() -> RuntimeCapabilities:
+    """Current runtime capabilities, fail-open for read-only surfaces.
+
+    ``get_runtime()`` raises on an unknown ``AGENT_RUNTIME`` and the ACP
+    factory raises on a missing/malformed launch envelope — correct for
+    execution paths, but ``/health`` is unauthenticated and load-bearing
+    (monitoring, dispatch-breaker ``consecutive_failures``, ``clone_status``,
+    readiness gates), so a config typo must degrade its capability block, not
+    turn the whole endpoint into a 500. The fallback preserves the pre-ACP UI
+    behavior for agents whose runtime cannot be constructed.
+    """
+    try:
+        return get_runtime().get_capabilities()
+    except Exception as exc:
+        logger.warning(
+            "Runtime capabilities unavailable (%s: %s); reporting legacy defaults",
+            type(exc).__name__,
+            exc,
+        )
+        return _LEGACY_CAPABILITIES

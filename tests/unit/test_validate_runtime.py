@@ -37,6 +37,7 @@ for _stub in _STUBBED_MODULE_NAMES:  # import-time eviction (monkeypatch can't r
 
 from services.agent_service.helpers import (  # noqa: E402  (must follow the stub eviction above)
     KNOWN_RUNTIME_NAMES,
+    validate_acp_launch,
     validate_runtime,
 )
 
@@ -93,3 +94,55 @@ def test_codex_is_a_known_runtime():
 def test_acp_is_a_known_runtime():
     assert "acp" in KNOWN_RUNTIME_NAMES
     validate_runtime("acp")
+
+
+# ---------------------------------------------------------------------------
+# validate_acp_launch — the ACP launch envelope must be buildable at create
+# time. `runtime: acp` with no command boots a container whose runtime can
+# never construct (a /health-degrading crash at first use); a `model:`
+# override fails every turn. Both must be named 400s at creation instead.
+# ---------------------------------------------------------------------------
+
+def _acp_error(runtime, command, args, model) -> str:
+    with pytest.raises(HTTPException) as excinfo:
+        validate_acp_launch(runtime, command, args, model)
+    assert excinfo.value.status_code == 400
+    return excinfo.value.detail
+
+
+def test_acp_launch_valid_envelope_passes():
+    validate_acp_launch("acp", "example-agent", ["serve", "--acp"], None)
+    validate_acp_launch("ACP", "/opt/agent/bin/agent", None, None)
+
+
+def test_acp_launch_requires_command():
+    assert "acp_runtime_command_required" in _acp_error("acp", None, None, None)
+    assert "acp_runtime_command_required" in _acp_error("acp", "   ", None, None)
+
+
+def test_acp_launch_rejects_model_override():
+    assert "acp_runtime_model_unsupported" in _acp_error(
+        "acp", "example-agent", None, "some-model"
+    )
+
+
+def test_acp_launch_rejects_malformed_args():
+    assert "acp_runtime_args_invalid" in _acp_error("acp", "agent", [1], None)
+    assert "acp_runtime_args_invalid" in _acp_error("acp", "agent", ["a\x00b"], None)
+    assert "acp_runtime_args_invalid" in _acp_error("acp", "agent", ["x"] * 129, None)
+    assert "acp_runtime_command_invalid" in _acp_error("acp", "a\x00gent", None, None)
+
+
+def test_non_acp_runtime_rejects_stray_launch_envelope():
+    # A command/args block on a CLI runtime would be silently ignored — name it.
+    assert "acp_launch_config_wrong_runtime" in _acp_error(
+        "claude-code", "example-agent", None, None
+    )
+    assert "acp_launch_config_wrong_runtime" in _acp_error(
+        None, None, ["--flag"], None
+    )
+
+
+def test_non_acp_runtime_without_envelope_passes():
+    validate_acp_launch(None, None, None, "sonnet")
+    validate_acp_launch("codex", "", [], "gpt-5.6")
