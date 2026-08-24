@@ -4,6 +4,7 @@ Agent Service Lifecycle - Agent start/stop and configuration management.
 Contains functions for starting, stopping, and reconfiguring agents.
 """
 import asyncio
+import json
 import logging
 import os
 import time
@@ -1522,12 +1523,18 @@ async def recreate_missing_container(agent_name: str):
     if isinstance(runtime_cfg, dict):
         runtime = (runtime_cfg.get("type") or "claude-code").lower()
         runtime_model = runtime_cfg.get("model") or ""
+        runtime_command = runtime_cfg.get("command") or ""
+        runtime_args = runtime_cfg.get("args") or []
     elif isinstance(runtime_cfg, str):
         runtime = runtime_cfg.lower()
         runtime_model = ""
+        runtime_command = ""
+        runtime_args = []
     else:
         runtime = "claude-code"
         runtime_model = ""
+        runtime_command = ""
+        runtime_args = []
     # #1811: the original template id (`local:scout`, `github:Org/repo@main`)
     # lived ONLY in the destroyed container's TEMPLATE_NAME env and
     # `trinity.template` label — the workspace `template.yaml` carries `name:`
@@ -1558,6 +1565,8 @@ async def recreate_missing_container(agent_name: str):
         "AGENT_SERVER_PORT": "8000",
         "AGENT_RUNTIME": runtime,
         "AGENT_RUNTIME_MODEL": runtime_model,
+        "AGENT_RUNTIME_COMMAND": runtime_command,
+        "AGENT_RUNTIME_ARGS": json.dumps(runtime_args),
         "TMPDIR": AGENT_DEFAULT_TMPDIR,
         # #1811: creation sets this (crud.py) and two consumers read it —
         # startup.sh gates local-template init on it, and the agent-server

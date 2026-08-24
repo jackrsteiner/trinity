@@ -212,6 +212,8 @@ class AgentConfig(BaseModel):
     # Multi-runtime support
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     runtime_model: Optional[str] = None  # Model override (e.g., "sonnet-4.5", "gemini-2.5-pro")
+    runtime_command: Optional[str] = None  # Generic external runtime executable (ACP)
+    runtime_args: Optional[List[str]] = None  # Shell-free external runtime argument vector
     # Security options
     full_capabilities: Optional[bool] = False  # True = Docker default caps (apt-get works), False = restricted (secure default)
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template

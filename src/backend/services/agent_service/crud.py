@@ -1135,6 +1135,8 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
             if isinstance(runtime_config, dict):
                 config.runtime = runtime_config.get("type", config.runtime)
                 config.runtime_model = runtime_config.get("model", config.runtime_model)
+                config.runtime_command = runtime_config.get("command", config.runtime_command)
+                config.runtime_args = runtime_config.get("args", config.runtime_args)
             elif isinstance(runtime_config, str):
                 config.runtime = runtime_config
             # Phase 9.11: Extract shared folder config from template
@@ -1553,6 +1555,10 @@ def _build_base_env(config: AgentConfig) -> dict:
         # Multi-runtime support
         'AGENT_RUNTIME': config.runtime or 'claude-code',
         'AGENT_RUNTIME_MODEL': config.runtime_model or '',
+        # Generic external-runtime launch envelope. JSON preserves the argument
+        # vector exactly; the agent side never invokes a shell.
+        'AGENT_RUNTIME_COMMAND': config.runtime_command or '',
+        'AGENT_RUNTIME_ARGS': json.dumps(config.runtime_args or []),
         # #1098: redirect scratch (pip/npm/build, ML wheels) off the 100 MB
         # noexec /tmp tmpfs onto the disk-backed, exec-capable home volume.
         # The dir is created at container start by startup.sh.
