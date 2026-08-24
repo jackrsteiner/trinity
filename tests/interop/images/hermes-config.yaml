@@ -1,0 +1,7 @@
+model:
+  default: gemini-3-flash-preview
+  provider: gemini
+  base_url: https://generativelanguage.googleapis.com/v1beta
+
+approvals:
+  mode: manual
