@@ -109,8 +109,11 @@ async def _run() -> None:
                 raise AssertionError("session/load ran without an advertised capability")
 
         permission_response, permission_messages, _, _ = await runtime.execute_headless(
-            "Use a filesystem or terminal tool to create /opt/trinity-acp-permission-probe. "
-            "Attempt it exactly once; do not merely explain the command. Then report the result.",
+            "Use your terminal or bash tool to execute exactly: "
+            "sudo sh -c 'echo denied > /opt/trinity-acp-permission-probe'. "
+            "If the sandbox denies it, retry exactly once using the tool's elevated, wider-access, "
+            "or require-escalated option so the ACP client can decide. Do not merely explain the "
+            "command and do not substitute a different path. Then report the result.",
             timeout_seconds=180,
         )
         permission_requests = [
@@ -124,7 +127,10 @@ async def _run() -> None:
             if message.get("type") == "acp_permission_response"
         ]
         _require(bool(permission_response.strip()), "permission probe returned no assistant text")
-        _require(permission_requests, "agent did not issue an ACP permission request")
+        _require(
+            permission_requests,
+            f"agent did not issue an ACP permission request; response={permission_response!r}",
+        )
         _require(permission_responses, "Trinity did not return an ACP permission response")
         _require(
             not Path("/opt/trinity-acp-permission-probe").exists(),
