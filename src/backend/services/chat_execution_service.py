@@ -53,6 +53,7 @@ from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.task_execution_service import (
     _compute_context_used,
     agent_post_with_retry,
+    gate_system_prompt,
     get_task_execution_service,
     dispatch_breaker_active,
 )
@@ -287,17 +288,25 @@ def build_chat_payload(
             source_mcp_key_name=x_mcp_key_name,
             model=request.model,
         )
-        payload["system_prompt"] = compose_system_prompt(
-            execution_context=exec_ctx,
-            include_execution_context=is_execution_context_enabled(),
-            runtime=agent_runtime,
+        # ACP v1 has no portable system-instruction channel — ungated, every
+        # sync-chat turn to an ACP agent would 409 at the runtime (the platform
+        # prompt is Trinity policy, so it is gated here, never disguised as
+        # user text). Same gate execute_task applies on the /task path.
+        payload["system_prompt"] = gate_system_prompt(
+            agent_runtime,
+            compose_system_prompt(
+                execution_context=exec_ctx,
+                include_execution_context=is_execution_context_enabled(),
+                runtime=agent_runtime,
+            ),
         )
     except Exception as e:
         logger.warning(f"[Chat] execution context build failed, falling back: {e}")
         # ent#243: pass the model here too — a context-build failure must not
         # silently swap the prompt tier as well as the context block.
-        payload["system_prompt"] = get_platform_system_prompt(
-            runtime=agent_runtime, model=request.model
+        payload["system_prompt"] = gate_system_prompt(
+            agent_runtime,
+            get_platform_system_prompt(runtime=agent_runtime, model=request.model),
         )
     # Pass execution ID so agent registers process under the same ID (enables termination)
     if task_execution_id:

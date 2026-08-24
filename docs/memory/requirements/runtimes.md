@@ -297,7 +297,21 @@ a fourth runtime.
   session load after the live process is gone when `loadSession` is absent.
 - Reject or disable unavailable model selection, cost/usage telemetry, MCP,
   content types, resume, and other Trinity features instead of synthesizing
-  them.
+  them. Refusals are typed: capability refusals answer **409**
+  (`ACPFeatureUnavailable`), protocol/agent/process failures **502**, prompt
+  timeout **504** — never 503/429, which the backend reads as AUTH/rate
+  signals the adapter cannot portably prove. Known limitation: a provider
+  auth failure inside an ACP agent classifies as AGENT_ERROR, not AUTH.
+- The platform stops sending what the runtime refuses: the Trinity system
+  prompt is gated off for ACP at BOTH backend dispatch layers
+  (`task_execution_service` and the sync-chat path in
+  `chat_execution_service`), `"acp"` is in
+  `RUNTIMES_WITHOUT_SESSION_TAB_RESUME`, and the Chat UI hides model/resume
+  controls from the negotiated snapshot.
+- Chat reset reaches the runtime (`reset_chat()` closes the live protocol
+  session — a transcript reset must not silently keep the agent process's
+  prior context) and per-turn metadata is reset on the persistent chat
+  session so a reported cost is never re-accumulated across turns.
 - Translate standard ACP message/tool/usage updates into Trinity's neutral
   response, execution-log, and metadata types without relying on ACP-agent or
   provider identity.
@@ -308,6 +322,22 @@ a fourth runtime.
 
 - The template runtime block selects `type: acp` and supplies a generic
   executable plus argument vector. The process is launched without a shell.
+  Creation validates the envelope (`validate_acp_launch`): `runtime: acp`
+  without a command, a `model:` override, malformed/oversized args, or a
+  command/args block on a non-ACP runtime are named 400s at create time —
+  never a boot-time crash-loop or a per-turn failure. **Current scope:** the
+  block is honored on `local:` templates, local deploy, and container
+  rebuild; the `github:` catalog path does not populate `template_data`, so
+  ACP via `github:` templates is not yet supported.
+- **Read-only mode fails closed**: ACP has no portable enforcement channel,
+  so an enabled read-only flag refuses the turn (409) instead of running
+  unenforced; an unreadable/corrupt flag file stays fail-open with a WARNING
+  (loader parity with Codex). Guardrails likewise have no portable channel
+  and are not wired — nothing is presented as enforced that is not.
+- Observability reads fail open: `/health`, `/api/chat/session` and
+  `GET /api/model` use `get_capabilities_snapshot()`, which degrades to
+  legacy defaults when the runtime cannot be constructed — a runtime config
+  typo must never 500 the unauthenticated, load-bearing `/health`.
 - `ACPRuntime` contains no harness, provider, executable-name, model-name, or
   credential-name branches and no agent-specific environment workarounds.
 - Container capabilities, filesystem and mount policy, credential injection,

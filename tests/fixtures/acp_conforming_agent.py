@@ -25,6 +25,7 @@ from acp.schema import (
     AgentCapabilities,
     AudioContentBlock,
     ClientCapabilities,
+    Cost,
     EmbeddedResourceContentBlock,
     ImageContentBlock,
     Implementation,
@@ -37,6 +38,7 @@ from acp.schema import (
     ToolCallUpdate,
     TextContentBlock,
     Usage,
+    UsageUpdate,
 )
 
 
@@ -104,16 +106,34 @@ class ConformingAgent(Agent):
         text = "".join(block.text for block in prompt if getattr(block, "type", None) == "text")
         if text == "error":
             raise RequestError.internal_error("intentional test error")
+        if text == "cost":
+            await self.connection.session_update(
+                session_id,
+                UsageUpdate(
+                    session_update="usage_update",
+                    used=10,
+                    size=100,
+                    cost=Cost(amount=1.25, currency="USD"),
+                ),
+            )
         if text == "permission":
+            options = [
+                PermissionOption(option_id="allow", name="Allow", kind="allow_once"),
+            ]
+            if not self.args.allow_only:
+                options.append(
+                    PermissionOption(option_id="deny", name="Deny", kind="reject_once")
+                )
             result = await self.connection.request_permission(
                 session_id=session_id,
                 tool_call=ToolCallUpdate(tool_call_id="tool-1", title="Test tool"),
-                options=[
-                    PermissionOption(option_id="allow", name="Allow", kind="allow_once"),
-                    PermissionOption(option_id="deny", name="Deny", kind="reject_once"),
-                ],
+                options=options,
             )
-            self._record("permission", outcome=result.outcome.outcome)
+            self._record(
+                "permission",
+                outcome=result.outcome.outcome,
+                option_id=getattr(result.outcome, "option_id", None),
+            )
         if text == "cancel":
             await self.cancelled.wait()
             return PromptResponse(stop_reason="cancelled")
@@ -142,6 +162,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--events")
     parser.add_argument("--load", action="store_true")
+    parser.add_argument("--allow-only", action="store_true")
     return parser.parse_args()
 
 

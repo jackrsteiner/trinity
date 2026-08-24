@@ -43,7 +43,13 @@ logger = logging.getLogger(__name__)
 # resume/fallback/reaping model, so we run a stateless turn for them instead.
 # ONE backend constant — keep in sync with the agent-side
 # `RuntimeCapabilities.session_tab_resume`.
-RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex"}
+# "acp": statically False pre-negotiation (an ACP agent may advertise
+# session/load, but the backend cannot know that without a live container, so
+# the conservative static value governs here — same rule as Codex). Without
+# this the resumable-turn engine passes resume_session_id to an agent that may
+# not support it, and the resulting 409 is not the Claude "JSONL missing"
+# error, so the engine's cold retry never fires and the thread stays broken.
+RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex", "acp"}
 
 
 def supports_session_resume(agent_name: str) -> bool:

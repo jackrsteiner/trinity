@@ -111,9 +111,16 @@ schedule_pending_pull_result_resend(app)
 
 @app.on_event("shutdown")
 async def close_agent_runtime() -> None:
-    """Give protocol runtimes a clean connection/process shutdown."""
-    from .services.runtime_adapter import get_runtime
-    await get_runtime().close()
+    """Give protocol runtimes a clean connection/process shutdown.
+
+    Guarded: get_runtime() raises on a misconfigured AGENT_RUNTIME / ACP launch
+    envelope, and shutdown must never fail on an agent that also could not run.
+    """
+    try:
+        from .services.runtime_adapter import get_runtime
+        await get_runtime().close()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(f"Runtime shutdown skipped: {exc}")
 
 
 def run_server():

@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
 from ..services.claude_code import get_execution_lock
-from ..services.runtime_adapter import get_runtime
+from ..services.runtime_adapter import get_capabilities_snapshot, get_runtime
 from ..services.process_registry import get_process_registry
 from ..services import result_callback
 
@@ -222,7 +222,9 @@ async def get_chat_history():
 @router.get("/api/chat/session")
 async def get_session_info():
     """Get current session information including token usage"""
-    capabilities = get_runtime().get_capabilities()
+    # Fail-open snapshot: this is a read surface — a misconfigured runtime
+    # must degrade the capability block, never 500 the endpoint.
+    capabilities = get_capabilities_snapshot()
     return {
         "session_started": agent_state.session_started,
         "message_count": len(agent_state.conversation_history),
@@ -244,7 +246,7 @@ async def get_session_info():
 @router.get("/api/model")
 async def get_model():
     """Get the current model being used"""
-    capabilities = get_runtime().get_capabilities()
+    capabilities = get_capabilities_snapshot()
     if not capabilities.model_selection:
         return {
             "model": None,
@@ -276,8 +278,7 @@ async def set_model(request: ModelRequest):
     """Set the model to use for subsequent messages"""
     from fastapi import HTTPException
 
-    adapter = get_runtime()
-    if not adapter.get_capabilities().model_selection:
+    if not get_capabilities_snapshot().model_selection:
         raise HTTPException(
             status_code=409,
             detail="Model selection is not supported by this runtime",
@@ -323,6 +324,13 @@ async def set_model(request: ModelRequest):
 async def clear_chat_history():
     """Clear conversation history and reset session"""
     agent_state.reset_session()
+    # ADR 0002 §7: a protocol runtime holding a live chat process must close it
+    # on reset, or "New Chat" silently keeps the prior context. Best-effort —
+    # a misconfigured runtime must not block the transcript reset itself.
+    try:
+        await get_runtime().reset_chat()
+    except Exception as exc:
+        logger.warning(f"Runtime chat reset failed (continuing): {exc}")
     return {
         "status": "cleared",
         "session_reset": True,
@@ -348,8 +356,15 @@ async def terminate_execution(execution_id: str):
     This allows Claude Code to finish its current operation gracefully.
     """
     registry = get_process_registry()
-    runtime = get_runtime()
-    if await runtime.cancel_execution(execution_id):
+    # Protocol-native cancellation first, when the runtime accepts
+    # responsibility; guarded so a misconfigured runtime still falls through to
+    # the process-registry signal path instead of turning terminate into a 500.
+    try:
+        cancelled_via_protocol = await get_runtime().cancel_execution(execution_id)
+    except Exception as exc:
+        logger.warning(f"[Terminate] runtime protocol cancel unavailable ({exc}); using signals")
+        cancelled_via_protocol = False
+    if cancelled_via_protocol:
         logger.info(f"[Terminate] Execution {execution_id} cancelled through its runtime protocol")
         return {"status": "terminated", "execution_id": execution_id}
     # registry.terminate() does up to 7s of synchronous process.wait() (SIGINT grace + SIGKILL grace);

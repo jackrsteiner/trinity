@@ -53,7 +53,12 @@ from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, 
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from .fork_to_own import fork_template_to_own_repo
 from . import snapshot_import
-from .helpers import validate_base_image, is_claude_runtime, validate_runtime
+from .helpers import (
+    validate_base_image,
+    is_claude_runtime,
+    validate_acp_launch,
+    validate_runtime,
+)
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import (
     AGENT_TMPFS_MOUNT,
@@ -3020,6 +3025,17 @@ async def create_agent_internal(
     # template). Reject an unknown one now (clear 400) instead of letting the
     # agent container crash-loop on boot when get_runtime() can't resolve it.
     validate_runtime(config.runtime)
+    # ACP: the launch envelope must be buildable NOW — `runtime: acp` with no
+    # command boots a container whose runtime can never construct, and a
+    # `model:` override fails every turn (ACP v1 has no portable model
+    # selection). Both become named 400s here instead. Runs after
+    # _resolve_template so template-supplied runtime blocks are covered too.
+    validate_acp_launch(
+        config.runtime,
+        config.runtime_command,
+        config.runtime_args,
+        config.runtime_model,
+    )
 
     # #1187: normalize the stored runtime to lowercase so the AGENT_RUNTIME env
     # var and the `trinity.agent-runtime` label agree with the exact-case checks

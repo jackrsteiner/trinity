@@ -14,7 +14,7 @@ from fastapi import APIRouter
 from ..models import AgentInfo
 from ..safe_yaml import AliasPolicy, load_hardened_yaml
 from ..state import agent_state
-from ..services.runtime_adapter import get_runtime
+from ..services.runtime_adapter import get_capabilities_snapshot, get_runtime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -77,13 +77,21 @@ def _diagnostics() -> Dict[str, Any]:
 
 
 def _runtime_capability_payload() -> Dict[str, Any]:
-    """Return the runtime's current conservative/negotiated feature snapshot."""
-    runtime = get_runtime()
+    """Return the runtime's current conservative/negotiated feature snapshot.
+
+    Fail-open by construction: /health must keep answering when the runtime
+    cannot be constructed (unknown AGENT_RUNTIME, missing ACP launch envelope)
+    — `get_capabilities_snapshot()` degrades to legacy defaults instead of
+    raising, and the raw-capability read is best-effort.
+    """
     payload: Dict[str, Any] = {
         "runtime": agent_state.agent_runtime,
-        "capabilities": runtime.get_capabilities().to_dict(),
+        "capabilities": get_capabilities_snapshot().to_dict(),
     }
-    raw = getattr(runtime, "raw_capabilities", None)
+    try:
+        raw = getattr(get_runtime(), "raw_capabilities", None)
+    except Exception:
+        raw = None
     if raw:
         payload["protocol_capabilities"] = raw
     return payload

@@ -99,6 +99,22 @@ runtime MUST wire all four:
 4. **Credential sanitization** — run the sanitizer over the response text AND the
    raw log/stderr, exactly as the Claude/headless paths do.
 
+**Protocol runtimes (the generic ACP adapter) satisfy the same four
+differently — by refusal, not translation.** A harness-neutral adapter may not
+branch on the agent behind it (ADR 0002 §2), so where a per-CLI runtime
+*translates* a control, the ACP runtime *gates* it and the platform stops
+sending it: (1) the system prompt is disabled at BOTH backend dispatch layers
+(`gate_system_prompt` in `task_execution_service` and
+`chat_execution_service` — gate one and every sync-chat turn 409s); (2)
+read-only mode **fails closed** — the runtime refuses the turn (409) because
+running unenforced behind an active toggle is the silent-bypass this section
+exists to prevent (the corrupt-config case stays fail-open + WARN, matching
+the Codex loader direction); (3) guardrails have no portable channel and are
+not wired — the refusal posture plus container isolation is the honest
+boundary; (4) sanitization applies unchanged to streamed events and stderr.
+When adding a capability-shaped feature, extend `RuntimeCapabilities` and gate
+consumers on it rather than adding a runtime-name branch.
+
 ## 6. Credentials + subscription (backend)
 
 If the runtime authenticates with its own key (not a Claude subscription):
