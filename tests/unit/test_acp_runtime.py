@@ -86,6 +86,25 @@ async def test_permission_round_trip_defaults_to_denied(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_standard_stdio_mcp_configuration_is_forwarded(tmp_path):
+    runtime, events_path = _runtime(tmp_path)
+    assert runtime.configure_mcp(
+        {
+            "mcpServers": {
+                "portable-server": {
+                    "command": "example-mcp",
+                    "args": ["--stdio"],
+                    "env": {"EXAMPLE": "value"},
+                }
+            }
+        }
+    )
+    await runtime.execute_headless("hello")
+    new_event = next(item for item in _events(events_path) if item["event"] == "new")
+    assert new_event["mcp_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_permission_round_trip_uses_resolver(tmp_path):
     runtime, events_path = _runtime(
         tmp_path,
