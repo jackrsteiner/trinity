@@ -1,0 +1,116 @@
+name: acp-provider-image-smoke
+
+# Credentialed, provider-backed acceptance for the two reference harnesses.
+# Automatic execution is limited to this fork-owned test branch. Provider
+# secrets are passed at container runtime, never as build args or image layers.
+on:
+  push:
+    branches: [test/acp-provider-image-smoke]
+    paths:
+      - 'docker/base-image/**'
+      - 'tests/interop/**'
+      - '.github/workflows/acp-provider-image-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acp-provider-image-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HERMES_REF: 91e867631e9d2eb9fbd69edd4459475d38070979
+  DEEPSEEK_HARNESS_REF: b150a551b8d465e31e418e1b2eaf5e79bbb7d28e
+  TRINITY_BASE_IMAGE: trinity-agent-base:acp-interop
+
+jobs:
+  hermes-gemini:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Require Gemini credential
+        run: |
+          set -euo pipefail
+          if [ -z "${GEMINI_API_KEY:-}" ]; then
+            echo "::error::Repository secret GEMINI_API_KEY is required"
+            exit 1
+          fi
+
+      - name: Build Trinity ACP base image
+        run: |
+          docker build \
+            --build-arg TRINITY_PREINSTALL_PLUGINS=0 \
+            --tag "$TRINITY_BASE_IMAGE" \
+            docker/base-image
+
+      - name: Build pinned Hermes ACP image
+        run: |
+          docker build \
+            --file tests/interop/images/hermes.Dockerfile \
+            --build-arg TRINITY_BASE_IMAGE="$TRINITY_BASE_IMAGE" \
+            --build-arg HERMES_REF="$HERMES_REF" \
+            --tag trinity-acp-hermes:interop \
+            tests/interop
+
+      - name: Run Hermes Gemini acceptance
+        run: |
+          docker run --rm --init \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs /workspace:rw,nosuid,nodev,size=512m \
+            --tmpfs /home/developer/.hermes:rw,nosuid,nodev,size=256m \
+            -e GEMINI_API_KEY \
+            -e GOOGLE_API_KEY \
+            -e TRINITY_ACP_EXPECT_CAPABILITIES='{"negotiated":true}' \
+            trinity-acp-hermes:interop \
+            sh -c 'cp /opt/trinity-interop/hermes-config.yaml "$HOME/.hermes/config.yaml" && python /opt/trinity-interop/run_provider_smoke.py'
+
+  deepseek-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Require DeepSeek credential
+        run: |
+          set -euo pipefail
+          if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+            echo "::error::Repository secret DEEPSEEK_API_KEY is required"
+            exit 1
+          fi
+
+      - name: Build Trinity ACP base image
+        run: |
+          docker build \
+            --build-arg TRINITY_PREINSTALL_PLUGINS=0 \
+            --tag "$TRINITY_BASE_IMAGE" \
+            docker/base-image
+
+      - name: Build pinned DeepSeek Harness ACP image
+        run: |
+          docker build \
+            --file tests/interop/images/deepseek.Dockerfile \
+            --build-arg TRINITY_BASE_IMAGE="$TRINITY_BASE_IMAGE" \
+            --build-arg DEEPSEEK_HARNESS_REF="$DEEPSEEK_HARNESS_REF" \
+            --tag trinity-acp-deepseek:interop \
+            tests/interop
+
+      - name: Run DeepSeek Harness acceptance
+        run: |
+          docker run --rm --init \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs /workspace:rw,nosuid,nodev,size=512m \
+            --tmpfs /opt/deepseek-harness/.sessions:rw,nosuid,nodev,size=512m \
+            -e DEEPSEEK_API_KEY \
+            -e TRINITY_ACP_EXPECT_CAPABILITIES='{"negotiated":true,"session_load":false}' \
+            trinity-acp-deepseek:interop \
+            python /opt/trinity-interop/run_provider_smoke.py
