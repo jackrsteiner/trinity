@@ -137,13 +137,22 @@ async def _run() -> None:
             "denied permission probe unexpectedly created its target",
         )
 
+        ready_response, _, ready_metadata, _ = await runtime.execute(
+            "Reply with exactly: Trinity ACP cancellation ready"
+        )
+        _require(
+            "trinity acp cancellation ready" in ready_response.lower(),
+            "persistent cancellation session did not become ready",
+        )
+        _require(ready_metadata.status == "success", "cancellation setup turn failed")
+
         execution_id = f"interop-cancel-{uuid.uuid4()}"
         cancel_task = asyncio.create_task(
-            runtime.execute_headless(
-                "Produce a detailed, multi-section technical analysis of this workspace. "
-                "Inspect files with tools before answering and continue until cancelled.",
+            runtime.execute(
+                "Before answering, use your terminal or bash tool to execute exactly: sleep 30. "
+                "Wait for that command to finish, then reply with: cancellation missed.",
+                continue_session=True,
                 execution_id=execution_id,
-                timeout_seconds=180,
             )
         )
         _require(
