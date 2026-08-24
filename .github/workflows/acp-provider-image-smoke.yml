@@ -64,7 +64,7 @@ jobs:
             --read-only \
             --tmpfs /tmp:rw,nosuid,nodev,size=1g \
             --tmpfs /workspace:rw,nosuid,nodev,size=512m \
-            --tmpfs /home/developer/.hermes:rw,nosuid,nodev,size=256m \
+            --tmpfs /home/developer/.hermes:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=0700 \
             -e GEMINI_API_KEY \
             -e GOOGLE_API_KEY \
             -e TRINITY_ACP_EXPECT_CAPABILITIES='{"negotiated":true}' \

@@ -23,7 +23,7 @@ RUN install -d -o developer -g developer /opt/trinity-interop
 COPY --chown=developer:developer run_provider_smoke.py /opt/trinity-interop/run_provider_smoke.py
 
 ENV AGENT_RUNTIME=acp
-ENV AGENT_RUNTIME_COMMAND=/usr/local/bin/pnpm
+ENV AGENT_RUNTIME_COMMAND=pnpm
 ENV AGENT_RUNTIME_ARGS='["--dir","/opt/deepseek-harness","run","demo:acp"]'
 ENV TRINITY_ACP_INTEROP_AGENT=deepseek
 ENV DSH_PERMISSION_MODE=workspace-write
